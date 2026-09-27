@@ -1,0 +1,15 @@
+<Solution>
+  <Folder Name="/docs/">
+    <File Path="docs/TEF668X - User Manual.pdf" />
+    <File Path="docs/TEF668X - User Manual.txt" />
+  </Folder>
+  <Folder Name="/Solution Items/">
+    <File Path="ImplicateX.TinyCLR.Drivers.Tuner.Tef668x.nuspec" />
+    <File Path="license.txt" />
+    <File Path="README.md" />
+  </Folder>
+  <Project Path="App/App.csproj" Id="3fcf359a-31f6-4468-8cf3-5571285194e8">
+    <Deploy />
+  </Project>
+  <Project Path="Library/Library.csproj" Id="7e80314f-601d-4f37-bc5a-457a18efb985" />
+</Solution>

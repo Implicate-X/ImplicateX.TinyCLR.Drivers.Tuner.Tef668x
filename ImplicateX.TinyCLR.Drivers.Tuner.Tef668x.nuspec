@@ -1,0 +1,32 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+
+<package xmlns="http://schemas.microsoft.com/packaging/2011/08/nuspec.xsd">
+  <metadata>
+    <id>ImplicateX.TinyCLR.Drivers.Tuner.Tef668x</id>
+    <readme>README.md</readme>
+    <version>1.0</version>
+    <authors>ImplicateX</authors>
+    <owners>ImplicateX</owners>
+    <projectUrl>https://homelabs.one</projectUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <description>TEF668X - TinyCLR OS.</description>
+    <copyright>(c) 2026 Robert Dettmann</copyright>
+    <tags>TinyCLR Tuner TEF668X</tags>
+
+    <dependencies>
+      <group targetFramework="net48">
+        <dependency id="GHIElectronics.TinyCLR.Core" version="3.0.2.1000" />
+        <dependency id="GHIElectronics.TinyCLR.Native" version="3.0.2.1000" />
+        <dependency id="GHIElectronics.TinyCLR.Pins" version="3.0.2.1000" />
+        <dependency id="GHIElectronics.TinyCLR.IO" version="3.0.2.1000" />      
+        <dependency id="GHIElectronics.TinyCLR.Devices.Gpio" version="3.0.2.1000" />      
+        <dependency id="GHIElectronics.TinyCLR.Devices.I2c" version="3.0.2.1000" />
+      </group>
+    </dependencies>
+  </metadata>
+
+  <files>
+    <file src="README.md" target="" />    
+    <file src="bin\Release\ImplicateX.TinyCLR.Drivers.Tuner.Tef668x.dll" target="lib\net48" />
+  </files>
+</package>
