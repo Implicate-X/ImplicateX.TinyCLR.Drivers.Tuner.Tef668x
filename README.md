@@ -51,6 +51,20 @@ This allows for a complete **audio quality display**—just like in a car.
 
 (Full RDS decoding will follow later.)
 
+### ✔ RDS IRQ + Buffer Pipeline
+- GPIO IRQ (`rdsPin`) triggers on DAVN edge changes  
+- IRQ handler only timestamps + schedules work (no I²C in callback)  
+- RDS worker thread reads `Get_RDS_Status` / `Get_RDS_Data` and pushes frames into a bounded FIFO  
+- Application/display thread consumes frames via `TryDequeueRdsFrame(out Device.RdsFrame frame)`
+
+Flow summary:
+1. TEF GPIO is routed to FM RDS DAVN (`APPL Set_GPIO`) and RDS interface is enabled (`Set_RDS`).
+2. DAVN edge requests worker service.
+3. Worker drains pending frames and enqueues them.
+4. Consumer loop dequeues frames asynchronously.
+
+Note: RDS watchdog is opt-in and **disabled by default** to avoid audio artifacts from periodic polling.
+
 ### ✔ Signal Quality
 - Stereo available  
 - Digital radio available (DAB/DRM flag)  
