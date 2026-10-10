@@ -24,7 +24,7 @@ The result is a **true TinyCLR tuner** that is technically far superior to typic
 ## 🚀 Features
 
 ### ✔ FM Tuning
-- Frequency selection in 100-kHz steps  
+- Frequency selection in 10-kHz steps  
 - Stable PLL lock  
 - Automatic IF correction  
 - Pilot detection (stereo flag)
