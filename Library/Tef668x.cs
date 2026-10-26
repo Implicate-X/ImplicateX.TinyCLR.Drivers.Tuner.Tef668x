@@ -24,6 +24,7 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 		private const int patchChunkBytes = 24;
 		private I2cDevice i2CDevice;
 		private PatchEngine patchEngine;
+		private ushort currentFmFrequency10kHz;
 
 		/// <summary>
 		/// Immutable snapshot of one RDS read transaction.
@@ -106,6 +107,12 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 			ActiveStandby = 2,
 			ActiveFm = 3,
 			ActiveAm = 4
+		}
+
+		public enum SeekDirection
+		{
+			Up,
+			Down
 		}
 
 		/// <summary>
@@ -354,7 +361,166 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 			}
 
 			WriteSetCommand( Module.FMRadioReception, command: 0x01, index: 0x01, 0x0001, frequency10kHz );
+			currentFmFrequency10kHz = frequency10kHz;
 			Debug.WriteLineIf( enableDebugOutput, $"TEF6686 FM tune: {frequency10kHz / 100}.{frequency10kHz % 100:D2} MHz" );
+		}
+
+		/// <summary>
+		/// Seeks the next FM station in the specified direction within the provided frequency range and optional RDS
+		/// synchronization requirement.
+		/// </summary>
+		/// <remarks>The search wraps within the specified range and validates station quality in two consecutive
+		/// checks before confirming a hit.</remarks>
+		/// <param name="direction">Search direction to move through the FM band.</param>
+		/// <param name="foundFrequency10kHz">Receives the frequency of the station found, in 10 kHz units; set to 0 when no station is found.</param>
+		/// <param name="requireRdsSync">Requires RDS synchronization before accepting a station.</param>
+		/// <param name="minFrequency10kHz">Lower frequency bound, in 10 kHz units.</param>
+		/// <param name="maxFrequency10kHz">Upper frequency bound, in 10 kHz units.</param>
+		/// <param name="step10kHz">Frequency increment per seek step, in 10 kHz units.</param>
+		/// <param name="minQualityStatus">Minimum quality status threshold a candidate station must meet.</param>
+		/// <param name="settleMilliseconds">Delay after tuning each candidate frequency before evaluating status values.</param>
+		/// <param name="maxSteps">Maximum number of candidate frequencies to evaluate before stopping.</param>
+		/// <param name="rdsSyncTimeoutMilliseconds">Maximum time to wait for RDS synchronization when required.</param>
+		/// <returns>true if a station meeting the criteria is found; otherwise, false.</returns>
+		/// <exception cref="ArgumentOutOfRangeException">Thrown when the frequency range is outside 65.00 to 108.00 MHz, when the minimum frequency is not less than the
+		/// maximum frequency, or when the seek step is 0.</exception>
+		public bool SeekNextStation(
+			SeekDirection direction,
+			out ushort foundFrequency10kHz,
+			bool requireRdsSync = false,
+			ushort minFrequency10kHz = 8700,
+			ushort maxFrequency10kHz = 10800,
+			ushort step10kHz = 10,
+			ushort minQualityStatus = 0x0100,
+			int settleMilliseconds = 45,
+			int maxSteps = 450,
+			int rdsSyncTimeoutMilliseconds = 1200 )
+		{
+			foundFrequency10kHz = 0;
+
+			if( minFrequency10kHz < 6500 || maxFrequency10kHz > 10800 || minFrequency10kHz >= maxFrequency10kHz )
+				throw new ArgumentOutOfRangeException( nameof( minFrequency10kHz ), "FM seek range must stay within 65.00 to 108.00 MHz and min < max." );
+
+			if( step10kHz == 0 )
+				throw new ArgumentOutOfRangeException( nameof( step10kHz ), "Seek step must be greater than zero." );
+
+			if( settleMilliseconds < 5 )
+				settleMilliseconds = 5;
+
+			if( maxSteps < 1 )
+				maxSteps = 1;
+
+			bool hasCurrent = currentFmFrequency10kHz >= minFrequency10kHz && currentFmFrequency10kHz <= maxFrequency10kHz;
+			ushort candidate = hasCurrent
+				? StepFrequency( currentFmFrequency10kHz, direction, minFrequency10kHz, maxFrequency10kHz, step10kHz )
+				: ( direction == SeekDirection.Up ? minFrequency10kHz : maxFrequency10kHz );
+
+			for( int i = 0; i < maxSteps; i++ )
+			{
+				TuneToFm( candidate );
+				Thread.Sleep( settleMilliseconds );
+
+				if( !TryGetFmQualityStatus( out ushort qualityStatus ) || !TryGetFmSignalStatus( out ushort signalStatus ) )
+				{
+					candidate = StepFrequency( candidate, direction, minFrequency10kHz, maxFrequency10kHz, step10kHz );
+					continue;
+				}
+
+				if( !IsLikelySeekCandidate( qualityStatus, signalStatus, minQualityStatus ) )
+				{
+					candidate = StepFrequency( candidate, direction, minFrequency10kHz, maxFrequency10kHz, step10kHz );
+					continue;
+				}
+
+				Thread.Sleep( 15 );
+
+				if( !TryGetFmQualityStatus( out ushort confirmQualityStatus ) || !TryGetFmSignalStatus( out ushort confirmSignalStatus ) )
+				{
+					candidate = StepFrequency( candidate, direction, minFrequency10kHz, maxFrequency10kHz, step10kHz );
+					continue;
+				}
+
+				if( !IsLikelySeekCandidate( confirmQualityStatus, confirmSignalStatus, minQualityStatus ) )
+				{
+					candidate = StepFrequency( candidate, direction, minFrequency10kHz, maxFrequency10kHz, step10kHz );
+					continue;
+				}
+
+				if( requireRdsSync && !WaitForRdsSync( rdsSyncTimeoutMilliseconds ) )
+				{
+					candidate = StepFrequency( candidate, direction, minFrequency10kHz, maxFrequency10kHz, step10kHz );
+					continue;
+				}
+
+				foundFrequency10kHz = candidate;
+				Debug.WriteLineIf( enableDebugOutput, $"TEF6686 seek hit: {foundFrequency10kHz / 100}.{foundFrequency10kHz % 100:D2} MHz" );
+				return true;
+			}
+
+			Debug.WriteLineIf( enableDebugOutput, "TEF6686 seek: no station found." );
+			return false;
+		}
+
+		/// <summary>
+		/// Waits until an RDS frame reports synchronization or the timeout interval expires.
+		/// </summary>
+		/// <remarks>Polls RDS status at short intervals until the deadline is reached.</remarks>
+		/// <param name="timeoutMilliseconds">Maximum time to wait, in milliseconds.</param>
+		/// <returns><see langword="true"/> if synchronization is detected before the timeout; otherwise, <see langword="false"/>.</returns>
+		private bool WaitForRdsSync( int timeoutMilliseconds )
+		{
+			DateTime deadline = DateTime.UtcNow.AddMilliseconds( timeoutMilliseconds );
+
+			while( DateTime.UtcNow <= deadline )
+			{
+				if( TryGetRdsStatus( out RdsFrame frame ) && frame.IsSynchronized )
+				{
+					return true;
+				}
+
+				Thread.Sleep( 40 );
+			}
+
+			return false;
+		}
+
+		/// <summary>
+		/// Determines whether the current status indicates a likely seek candidate.
+		/// </summary>
+		/// <param name="qualityStatus">Current quality metric to evaluate.</param>
+		/// <param name="signalStatus">Current signal status flags; bits masked by 0xC000 are treated as seek indicators.</param>
+		/// <param name="minQualityStatus">Minimum quality threshold required to qualify directly.</param>
+		/// <returns>true if qualityStatus meets or exceeds minQualityStatus, or if either signal flag in 0xC000 is set; otherwise,
+		/// false.</returns>
+		private static bool IsLikelySeekCandidate( ushort qualityStatus, ushort signalStatus, ushort minQualityStatus )
+		{
+			if( qualityStatus >= minQualityStatus )
+				return true;
+
+			return ( signalStatus & 0xC000 ) != 0;
+		}
+
+		/// <summary>
+		/// Calculates the next frequency by stepping up or down and wrapping to the opposite band edge when the limit is
+		/// exceeded.
+		/// </summary>
+		/// <param name="frequency10kHz">Current frequency in 10 kHz units.</param>
+		/// <param name="direction">Direction to step the frequency.</param>
+		/// <param name="minFrequency10kHz">Lower band limit in 10 kHz units.</param>
+		/// <param name="maxFrequency10kHz">Upper band limit in 10 kHz units.</param>
+		/// <param name="step10kHz">Step size in 10 kHz units.</param>
+		/// <returns>The stepped frequency in 10 kHz units, wrapped to the band minimum when stepping above the maximum, or to the band
+		/// maximum when stepping below the minimum.</returns>
+		private static ushort StepFrequency( ushort frequency10kHz, SeekDirection direction, ushort minFrequency10kHz, ushort maxFrequency10kHz, ushort step10kHz )
+		{
+			if( direction == SeekDirection.Up )
+			{
+				int stepped = frequency10kHz + step10kHz;
+				return stepped > maxFrequency10kHz ? minFrequency10kHz : (ushort)stepped;
+			}
+
+			int downwardStepped = frequency10kHz - step10kHz;
+			return downwardStepped < minFrequency10kHz ? maxFrequency10kHz : (ushort)downwardStepped;
 		}
 
 		/// <summary>

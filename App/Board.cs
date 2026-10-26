@@ -109,6 +109,8 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 			tef668x.SetAudioMute( mute: false );
 			tef668x.TuneToFm( frequency10kHz: tuneFrequency );
 
+			tef668x.SeekNextStation( direction: Tef668x.SeekDirection.Up, out ushort foundFrequency10kHz, requireRdsSync: true );
+
 			rdsSubSystem = tef668x.CreateRdsSubSystem( dataAvailableActiveHigh: false );
 			rdsSubSystem.Decoder.PsUpdated += ps => Debug.WriteLine( $"RDS PS: {ps}" );
 			rdsSubSystem.Decoder.RtUpdated += rt => Debug.WriteLine( $"RDS RT: {rt}" );
