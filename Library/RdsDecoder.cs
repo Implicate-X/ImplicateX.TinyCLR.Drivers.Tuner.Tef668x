@@ -435,10 +435,13 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 				if( c == '\0' )
 					return ' ';
 
-				if( c < 0x20 || c > 0x7E )
-					return ' ';
+				if( c >= 0x20 && c <= 0x7E )
+					return c;
 
-				return c;
+				if( c >= 0xA0 && c <= 0xFF )
+					return c;
+
+				return ' ';
 			}
 
 			/// <summary>
