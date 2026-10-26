@@ -1,59 +1,36 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
 using GHIElectronics.TinyCLR.Devices.Gpio;
 using GHIElectronics.TinyCLR.Devices.I2c;
 
-namespace ImplicateX.TinyCLR.Drivers.Tuner.Tef668x
+namespace ImplicateX.TinyCLR.Drivers.Tuner
 {
-	public enum TefGpioOutput : ushort
-	{
-		Rds = 0x0101,
-		Qsi = 0x0102,
-		QsiOrRdsActiveLow = 0x0103,
-		Agc = 0x0106
-	}
-
-	public partial class Device
+	public partial class Tef668x
 	(
 		string i2cControllerName,
-		int resPinID,
-		int rdsPinID,
+		GpioPin resPin,
+		GpioPin rdsPin,
 		int tefGpioIndex = 0,
-		TefGpioOutput tefGpioOutput = TefGpioOutput.Rds,
 		bool enableRdsWatchdog = false
 	)
 	{
 		private const byte i2cAddress = 0x64;
 		private const int patchChunkBytes = 24;
 		private const int rdsBufferCapacity = 32;
-		private const int rdsBurstReadLimit = 1;
-		private const int rdsBurstWindowMilliseconds = 120;
-		private const int rdsServiceIntervalMilliseconds = 20;
-		private const int rdsLowLevelKickIntervalMilliseconds = 500;
-		private const int rdsInterReadPauseMilliseconds = 2;
+		private const int rdsBurstReadLimit = 22;
+		private const int rdsBurstWindowMilliseconds = 1920;
+		private const int rdsServiceIntervalMilliseconds = 10;
+		private const int rdsLowLevelResyncIntervalMilliseconds = 87;
 		private const int rdsWatchdogIntervalMilliseconds = 75;
 		private const int rdsWatchdogEdgeGraceMilliseconds = 300;
-		private const int rdsRequiredPsChars = 6;
-		private const int rdsRequiredRtChars = 20;
 		private I2cDevice i2CDevice;
-		private GpioPin resPin;
-		private GpioPin rdsPin;
 		private PatchEngine patchEngine;
 		private readonly object rdsSync = new();
 		private readonly RdsFrame[] rdsFrames = new RdsFrame[ rdsBufferCapacity ];
-		private readonly List<string> rdsTextEntries = new();
-		private readonly char[] rdsProgramService = [ ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ' ];
-		private readonly bool[] rdsProgramServiceValid = new bool[ 8 ];
-		private readonly char[] rdsRadioText = new char[ 64 ];
-		private readonly bool[] rdsRadioTextValid = new bool[ 64 ];
 		private int rdsWriteIndex;
 		private int rdsReadIndex;
 		private int rdsFrameCount;
-		private ushort rdsPiCode;
-		private ushort rdsPty;
-		private byte rdsRadioTextAbFlag = 0xFF;
 		private bool isReadingRds;
 		private bool isRdsHandlerAttached;
 		private bool isRdsServiceThreadStarted;
@@ -61,29 +38,18 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner.Tef668x
 		private bool isRdsWatchdogStarted;
 		private DateTime lastRdsEdgeUtc = DateTime.MinValue;
 
-		public sealed class RdsFrame
+		public sealed class RdsFrame( ushort status, ushort blockA, ushort blockB, ushort blockC, ushort blockD, ushort decodeError, DateTime timestampUtc )
 		{
-			public ushort Status { get; }
-			public ushort BlockA { get; }
-			public ushort BlockB { get; }
-			public ushort BlockC { get; }
-			public ushort BlockD { get; }
-			public ushort DecodeError { get; }
-			public DateTime TimestampUtc { get; }
+			public ushort Status { get; } = status;
+			public ushort BlockA { get; } = blockA;
+			public ushort BlockB { get; } = blockB;
+			public ushort BlockC { get; } = blockC;
+			public ushort BlockD { get; } = blockD;
+			public ushort DecodeError { get; } = decodeError;
+			public DateTime TimestampUtc { get; } = timestampUtc;
 
 			public bool HasData => ( Status & 0x8000 ) != 0;
 			public bool HasDataLoss => ( Status & 0x4000 ) != 0;
-
-			public RdsFrame( ushort status, ushort blockA, ushort blockB, ushort blockC, ushort blockD, ushort decodeError, DateTime timestampUtc )
-			{
-				Status = status;
-				BlockA = blockA;
-				BlockB = blockB;
-				BlockC = blockC;
-				BlockD = blockD;
-				DecodeError = decodeError;
-				TimestampUtc = timestampUtc;
-			}
 		}
 
 		private sealed class Module
@@ -105,17 +71,15 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner.Tef668x
 
 		public void Initialize()
 		{
-			resPin = GpioController.GetDefault().OpenPin( resPinID );
-			rdsPin = GpioController.GetDefault().OpenPin( rdsPinID );
+			Debug.WriteLine( "TEF6686 init: open GPIO pins" );
 
-			resPin.SetDriveMode( GpioPinDriveMode.Output );
-			rdsPin.SetDriveMode( GpioPinDriveMode.InputPullUp );
-
+			Debug.WriteLine( "TEF6686 init: hardware reset pulse" );
 			resPin.Write( GpioPinValue.Low );
 			Thread.Sleep( 5 );
 			resPin.Write( GpioPinValue.High );
 			Thread.Sleep( 5 );
 
+			Debug.WriteLine( $"TEF6686 init: probe I2C address 0x{i2cAddress:X2}" );
 			if( !TryOpenDevice( i2cControllerName: i2cControllerName, address: i2cAddress ) )
 			{
 				throw new Exception( $"TEF6686 I2C device not found at address 0x{i2cAddress:X2} on controller {i2cControllerName}" );
@@ -126,20 +90,28 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner.Tef668x
 				throw new Exception( "TEF6686 operation status read failed." );
 			}
 
+			Debug.WriteLine( $"TEF6686 init: detected state 0x{currentStatus:X4}" );
+
 			if( currentStatus == (ushort)OperationStatus.Boot )
 			{
+				Debug.WriteLine( "TEF6686 init: boot state detected, running startup sequence" );
+				Debug.WriteLine( "TEF6686 init: apply patch/LUT" );
 				patchEngine = new( this );
 				patchEngine.ApplyPatch();
 
+				Debug.WriteLine( "TEF6686 init: send Start" );
 				WriteRawCommand( command: 0x14, 0x0001 );
 
+				Debug.WriteLine( "TEF6686 init: wait for idle state" );
 				if( !WaitForOperationStatus( OperationStatus.Idle, timeoutMilliseconds: 1500 ) )
 				{
 					throw new Exception( "TEF6686 did not enter idle state after Start command." );
 				}
 
+				Debug.WriteLine( "TEF6686 init: send Activate mode=1" );
 				WriteSetCommand( Module.SystemAndApplicationControl, command: 0x05, index: 0x01, 0x0001 );
 
+				Debug.WriteLine( "TEF6686 init: wait for active standby state" );
 				if( !WaitForOperationStatus( OperationStatus.ActiveStandby, timeoutMilliseconds: 2000 ) )
 				{
 					throw new Exception( "TEF6686 did not enter active standby state after Activate command." );
@@ -147,25 +119,38 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner.Tef668x
 			}
 			else if( currentStatus == (ushort)OperationStatus.Idle )
 			{
+				Debug.WriteLine( "TEF6686 init: idle state detected, skipping patch/start" );
+				Debug.WriteLine( "TEF6686 init: send Activate mode=1" );
 				WriteSetCommand( Module.SystemAndApplicationControl, command: 0x05, index: 0x01, 0x0001 );
 
+				Debug.WriteLine( "TEF6686 init: wait for active state" );
 				if( !WaitForOperationStatus( OperationStatus.ActiveStandby, timeoutMilliseconds: 2000 ) )
 				{
 					throw new Exception( "TEF6686 did not enter active state after Activate command." );
 				}
 			}
-			else if( !IsActiveState( currentStatus ) )
+			else if( IsActiveState( currentStatus ) )
+			{
+				Debug.WriteLine( "TEF6686 init: active state already present, skipping startup sequence" );
+			}
+			else
 			{
 				throw new Exception( $"TEF6686 unsupported operation status 0x{currentStatus:X4}" );
 			}
 
+			Debug.WriteLine( "TEF6686 init: read identification" );
 			if( TryGetIdentification( out ushort deviceId, out ushort hwVersion, out ushort swVersion ) )
 			{
 				Debug.WriteLine( $"TEF6686 identification: device=0x{deviceId:X4}, hw=0x{hwVersion:X4}, sw=0x{swVersion:X4}" );
 			}
+			else
+			{
+				Debug.WriteLine( "TEF6686 identification read failed" );
+			}
 
 			InitializeRdsCapture();
-			Debug.WriteLine( "TEF6686 init complete" );
+
+			Debug.WriteLine( "TEF6686 init: startup sequence complete" );
 		}
 
 		private bool IsActiveState( ushort status )
@@ -178,14 +163,24 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner.Tef668x
 		private bool WaitForOperationStatus( OperationStatus expectedStatus, int timeoutMilliseconds )
 		{
 			DateTime deadline = DateTime.UtcNow.AddMilliseconds( timeoutMilliseconds );
+			int lastStatus = -1;
 
 			while( DateTime.UtcNow <= deadline )
 			{
-				if( TryGetOperationStatus( out ushort status )
-					&& ( status == (ushort)expectedStatus
-						|| ( expectedStatus == OperationStatus.ActiveStandby && IsActiveState( status ) ) ) )
+				if( TryGetOperationStatus( out ushort status ) )
 				{
-					return true;
+					if( lastStatus != status )
+					{
+						Debug.WriteLine( $"TEF6686 status: 0x{status:X4}" );
+						lastStatus = status;
+					}
+
+					if( status == (ushort)expectedStatus
+						|| ( expectedStatus == OperationStatus.ActiveStandby && IsActiveState( status ) ) )
+					{
+						Debug.WriteLine( $"TEF6686 status reached: {expectedStatus} (0x{status:X4})" );
+						return true;
+					}
 				}
 
 				Thread.Sleep( 10 );
@@ -249,6 +244,7 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner.Tef668x
 		{
 			ushort mode = mute ? (ushort)1 : (ushort)0;
 			WriteSetCommand( Module.AudioProcessing, command: 0x0B, index: 0x01, mode );
+			Debug.WriteLine( $"TEF6686 audio mute: {( mute ? "on" : "off" )}" );
 		}
 
 		public void TuneToFm( ushort frequency10kHz )
@@ -259,6 +255,7 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner.Tef668x
 			}
 
 			WriteSetCommand( Module.FMRadioReception, command: 0x01, index: 0x01, 0x0001, frequency10kHz );
+			Debug.WriteLine( $"TEF6686 FM tune: {frequency10kHz / 100}.{frequency10kHz % 100:D2} MHz" );
 		}
 
 		public bool TryGetFmQualityStatus( out ushort status )
@@ -340,38 +337,27 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner.Tef668x
 			}
 		}
 
-		public List<string> RdsTextEntries
-		{
-			get
-			{
-				lock( rdsSync )
-				{
-					return new List<string>( rdsTextEntries );
-				}
-			}
-		}
+		//public int PollRdsBuffer( int maxFrames )
+		//{
+		//	if( maxFrames <= 0 )
+		//	{
+		//		throw new ArgumentOutOfRangeException( nameof( maxFrames ) );
+		//	}
 
-		public int PollRdsBuffer( int maxFrames )
-		{
-			if( maxFrames <= 0 )
-			{
-				throw new ArgumentOutOfRangeException( nameof( maxFrames ) );
-			}
+		//	if( !TryBeginRdsRead() )
+		//	{
+		//		return 0;
+		//	}
 
-			if( !TryBeginRdsRead() )
-			{
-				return 0;
-			}
-
-			try
-			{
-				return CaptureRdsFrames( maxFrames, stopWhenPinReleased: false );
-			}
-			finally
-			{
-				EndRdsRead();
-			}
-		}
+		//	try
+		//	{
+		//		return CaptureRdsFrames( maxFrames, stopWhenPinReleased: false );
+		//	}
+		//	finally
+		//	{
+		//		EndRdsRead();
+		//	}
+		//}
 
 		public bool TryDequeueRdsFrame( out RdsFrame frame )
 		{
@@ -433,25 +419,17 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner.Tef668x
 				throw new ArgumentOutOfRangeException( nameof( tefGpioIndex ), "TEF6686 GPIO index must be zero or greater." );
 			}
 
-			WriteSetCommand(
-				Module.SystemAndApplicationControl,
-				command: 0x03,
-				index: 0x01,
-				(ushort)tefGpioIndex,
-				Module.FMRadioReception,
-				(ushort)tefGpioOutput );
-
-			if( tefGpioOutput != TefGpioOutput.Rds && tefGpioOutput != TefGpioOutput.QsiOrRdsActiveLow )
-			{
-				return;
-			}
-
+			Debug.WriteLine( $"TEF6686 RDS: route DAVN to tuner GPIO {tefGpioIndex}" );
+			WriteSetCommand( Module.SystemAndApplicationControl, command: 0x03, index: 0x01, (ushort)tefGpioIndex, Module.FMRadioReception, 0x0101 );
+			Debug.WriteLine( "TEF6686 RDS: enable data-available signal pin" );
 			WriteSetCommand( Module.FMRadioReception, command: 0x51, index: 0x01, 0x01, 0x02, 0x02 );
 
 			GpioPinValue initialLevel = rdsPin.Read();
+			Debug.WriteLine( $"TEF6686 RDS: pin level after setup = {initialLevel}" );
 
 			if( !isRdsHandlerAttached )
 			{
+				Debug.WriteLine( "TEF6686 RDS: attach GPIO interrupt handler" );
 				rdsPin.ValueChanged += OnRdsPinValueChanged;
 				isRdsHandlerAttached = true;
 			}
@@ -462,17 +440,23 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner.Tef668x
 			{
 				StartRdsWatchdog();
 			}
-
-			if( initialLevel == GpioPinValue.Low )
+			else
 			{
-				RequestRdsService();
+				Debug.WriteLine( "TEF6686 RDS: watchdog disabled (IRQ-only mode)" );
 			}
-			else if( TryGetFmRdsStatus( out ushort statusAfterSetup, out bool availableAfterSetup, out bool lossAfterSetup ) )
+
+			if( TryGetFmRdsStatus( out ushort statusAfterSetup, out bool availableAfterSetup, out bool lossAfterSetup ) )
 			{
+				Debug.WriteLine( $"TEF6686 RDS: status after setup=0x{statusAfterSetup:X4} available={availableAfterSetup} loss={lossAfterSetup}" );
 				if( availableAfterSetup || lossAfterSetup )
 				{
+					Debug.WriteLine( "TEF6686 RDS: data already pending after init, schedule service" );
 					RequestRdsService();
 				}
+			}
+			else
+			{
+				Debug.WriteLine( "TEF6686 RDS: status read after setup failed" );
 			}
 		}
 
@@ -483,6 +467,8 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner.Tef668x
 				lastRdsEdgeUtc = DateTime.UtcNow;
 			}
 
+			GpioPinValue level = sender.Read();
+			Debug.WriteLine( $"TEF6686 RDS: edge={e.Edge} level={level}" );
 			RequestRdsService();
 		}
 
@@ -494,6 +480,7 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner.Tef668x
 			}
 
 			isRdsServiceThreadStarted = true;
+			Debug.WriteLine( "TEF6686 RDS: start IRQ service worker" );
 
 			Thread serviceThread = new( RdsServiceLoop );
 			serviceThread.Start();
@@ -523,20 +510,22 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner.Tef668x
 
 		private void RdsServiceLoop()
 		{
-			DateTime nextLowLevelKickUtc = DateTime.UtcNow;
+			DateTime nextLowLevelResyncUtc = DateTime.MinValue;
 
 			while( true )
 			{
 				Thread.Sleep( rdsServiceIntervalMilliseconds );
 
 				bool request = TryConsumeRdsServiceRequest();
-				if( !request && DateTime.UtcNow >= nextLowLevelKickUtc && rdsPin.Read() == GpioPinValue.Low )
+				bool lowLevelResync = false;
+
+				if( !request && DateTime.UtcNow >= nextLowLevelResyncUtc && rdsPin.Read() == GpioPinValue.Low )
 				{
-					request = true;
-					nextLowLevelKickUtc = DateTime.UtcNow.AddMilliseconds( rdsLowLevelKickIntervalMilliseconds );
+					lowLevelResync = true;
+					nextLowLevelResyncUtc = DateTime.UtcNow.AddMilliseconds( rdsLowLevelResyncIntervalMilliseconds );
 				}
 
-				if( !request )
+				if( !request && !lowLevelResync )
 				{
 					continue;
 				}
@@ -554,6 +543,7 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner.Tef668x
 						continue;
 					}
 
+					Debug.WriteLine( $"TEF6686 RDS service: status=0x{status:X4} available={available} loss={loss}" );
 					if( !available && !loss )
 					{
 						continue;
@@ -564,11 +554,6 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner.Tef668x
 				finally
 				{
 					EndRdsRead();
-				}
-
-				if( rdsPin.Read() == GpioPinValue.Low )
-				{
-					RequestRdsService();
 				}
 			}
 		}
@@ -581,6 +566,7 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner.Tef668x
 			}
 
 			isRdsWatchdogStarted = true;
+			Debug.WriteLine( "TEF6686 RDS: start watchdog" );
 
 			Thread watchdogThread = new( RdsWatchdogLoop );
 			watchdogThread.Start();
@@ -621,6 +607,7 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner.Tef668x
 						continue;
 					}
 
+					Debug.WriteLine( $"TEF6686 RDS watchdog: pending status=0x{status:X4} available={available} loss={loss}" );
 					CaptureRdsFrames( maxFrames: rdsBurstReadLimit, stopWhenPinReleased: false );
 				}
 				finally
@@ -656,12 +643,13 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner.Tef668x
 		{
 			int capturedFrames = 0;
 			DateTime burstDeadline = DateTime.UtcNow.AddMilliseconds( rdsBurstWindowMilliseconds );
+			Debug.WriteLine( $"TEF6686 RDS: capture start max={maxFrames} stopOnPinRelease={stopWhenPinReleased} pin={rdsPin.Read()}" );
 
 			for( int i = 0; i < maxFrames && DateTime.UtcNow < burstDeadline; )
 			{
 				if( !TryGetFmRdsData( out RdsFrame frame ) )
 				{
-					Debug.WriteLine( "TEF6686 RDS: Get_RDS_Data read failed" );
+					Debug.WriteLine( "TEF6686 RDS: Get_RDS_Data read failed, stop capture" );
 					break;
 				}
 
@@ -670,41 +658,40 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner.Tef668x
 					EnqueueRdsFrame( frame );
 					capturedFrames++;
 					i++;
-					if( frame.HasDataLoss )
-					{
-						Debug.WriteLine( $"TEF6686 RDS: data loss reported status=0x{frame.Status:X4}" );
-					}
-
-					if( stopWhenPinReleased && rdsPin.Read() == GpioPinValue.High )
-					{
-						break;
-					}
-
-					Thread.Sleep( rdsInterReadPauseMilliseconds );
+					Debug.WriteLine( $"TEF6686 RDS frame: A=0x{frame.BlockA:X4} B=0x{frame.BlockB:X4} C=0x{frame.BlockC:X4} D=0x{frame.BlockD:X4} err=0x{frame.DecodeError:X4} status=0x{frame.Status:X4}" );
 					continue;
 				}
 
 				if( TryGetFmRdsStatus( out ushort statusSnapshot, out bool availableSnapshot, out bool lossSnapshot ) )
 				{
+					Debug.WriteLine( $"TEF6686 RDS: empty data read status=0x{statusSnapshot:X4} available={availableSnapshot} loss={lossSnapshot} pin={rdsPin.Read()}" );
 					if( !availableSnapshot && !lossSnapshot )
 					{
+						Debug.WriteLine( "TEF6686 RDS: no pending RDS data after empty read, stop capture" );
 						break;
 					}
 				}
 				else
 				{
-					Debug.WriteLine( "TEF6686 RDS: Get_RDS_Status read failed" );
+					Debug.WriteLine( "TEF6686 RDS: empty data read and Get_RDS_Status failed" );
 					break;
 				}
 
 				if( !stopWhenPinReleased )
 				{
+					Debug.WriteLine( "TEF6686 RDS: stop capture after empty read (polling mode)" );
 					break;
 				}
 
 				Thread.Sleep( 10 );
 			}
 
+			if( DateTime.UtcNow >= burstDeadline )
+			{
+				Debug.WriteLine( "TEF6686 RDS: capture deadline reached" );
+			}
+
+			Debug.WriteLine( $"TEF6686 RDS: capture end frames={capturedFrames} pin={rdsPin.Read()}" );
 			return capturedFrames;
 		}
 
@@ -723,136 +710,7 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner.Tef668x
 				{
 					rdsFrameCount++;
 				}
-
-				UpdateDecodedRdsText( frame );
 			}
-		}
-
-		private void UpdateDecodedRdsText( RdsFrame frame )
-		{
-			if( !frame.HasData || !IsReliableFrameForText( frame ) )
-			{
-				return;
-			}
-
-			rdsPiCode = frame.BlockA;
-			ushort groupTypeCode = (ushort)( ( frame.BlockB >> 12 ) & 0x0F );
-			bool isGroupB = ( frame.BlockB & 0x0800 ) != 0;
-			rdsPty = (ushort)( ( frame.BlockB >> 5 ) & 0x1F );
-
-			if( groupTypeCode == 0 )
-			{
-				int segmentAddress = frame.BlockB & 0x03;
-				int baseIndex = segmentAddress * 2;
-				if( baseIndex + 1 < rdsProgramService.Length )
-				{
-					rdsProgramService[ baseIndex ] = (char)( frame.BlockD >> 8 );
-					rdsProgramService[ baseIndex + 1 ] = (char)( frame.BlockD & 0xFF );
-					rdsProgramServiceValid[ baseIndex ] = true;
-					rdsProgramServiceValid[ baseIndex + 1 ] = true;
-				}
-			}
-			else if( groupTypeCode == 2 )
-			{
-				byte abFlag = (byte)( ( frame.BlockB >> 4 ) & 0x01 );
-				if( rdsRadioTextAbFlag != 0xFF && rdsRadioTextAbFlag != abFlag )
-				{
-					for( int i = 0; i < rdsRadioText.Length; i++ )
-					{
-						rdsRadioText[ i ] = ' ';
-						rdsRadioTextValid[ i ] = false;
-					}
-				}
-
-				rdsRadioTextAbFlag = abFlag;
-
-				int segmentAddress = frame.BlockB & 0x0F;
-				if( isGroupB )
-				{
-					int baseIndex = segmentAddress * 2;
-					if( baseIndex + 1 < rdsRadioText.Length )
-					{
-						rdsRadioText[ baseIndex ] = (char)( frame.BlockD >> 8 );
-						rdsRadioText[ baseIndex + 1 ] = (char)( frame.BlockD & 0xFF );
-						rdsRadioTextValid[ baseIndex ] = true;
-						rdsRadioTextValid[ baseIndex + 1 ] = true;
-					}
-				}
-				else
-				{
-					int baseIndex = segmentAddress * 4;
-					if( baseIndex + 3 < rdsRadioText.Length )
-					{
-						rdsRadioText[ baseIndex ] = (char)( frame.BlockC >> 8 );
-						rdsRadioText[ baseIndex + 1 ] = (char)( frame.BlockC & 0xFF );
-						rdsRadioText[ baseIndex + 2 ] = (char)( frame.BlockD >> 8 );
-						rdsRadioText[ baseIndex + 3 ] = (char)( frame.BlockD & 0xFF );
-						rdsRadioTextValid[ baseIndex ] = true;
-						rdsRadioTextValid[ baseIndex + 1 ] = true;
-						rdsRadioTextValid[ baseIndex + 2 ] = true;
-						rdsRadioTextValid[ baseIndex + 3 ] = true;
-					}
-				}
-			}
-
-			RebuildRdsTextEntries();
-		}
-
-		private void RebuildRdsTextEntries()
-		{
-			rdsTextEntries.Clear();
-			rdsTextEntries.Add( $"PI: 0x{rdsPiCode:X4}" );
-			rdsTextEntries.Add( $"PTY: {rdsPty}" );
-
-			if( CountValid( rdsProgramServiceValid ) >= rdsRequiredPsChars )
-			{
-				rdsTextEntries.Add( "PS: " + BuildDisplayText( rdsProgramService, rdsProgramServiceValid ).Trim() );
-			}
-
-			if( CountValid( rdsRadioTextValid ) >= rdsRequiredRtChars )
-			{
-				rdsTextEntries.Add( "RT: " + BuildDisplayText( rdsRadioText, rdsRadioTextValid ).Trim() );
-			}
-		}
-
-		private static bool IsReliableFrameForText( RdsFrame frame )
-		{
-			if( frame.HasDataLoss )
-			{
-				return false;
-			}
-
-			return frame.DecodeError == 0;
-		}
-
-		private static int CountValid( bool[] validFlags )
-		{
-			int count = 0;
-			for( int i = 0; i < validFlags.Length; i++ )
-			{
-				if( validFlags[ i ] )
-				{
-					count++;
-				}
-			}
-
-			return count;
-		}
-
-		private static string BuildDisplayText( char[] chars, bool[] validFlags )
-		{
-			char[] result = new char[ chars.Length ];
-			for( int i = 0; i < chars.Length; i++ )
-			{
-				result[ i ] = validFlags[ i ] ? SanitizeRdsChar( chars[ i ] ) : ' ';
-			}
-
-			return new string( result );
-		}
-
-		private static char SanitizeRdsChar( char c )
-		{
-			return c >= 32 && c <= 126 ? c : ' ';
 		}
 
 		private void WriteSetCommand( byte module, byte command, byte index, params ushort[] dataWords )
@@ -928,6 +786,8 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner.Tef668x
 			{
 				this.i2CDevice = i2cController.GetDevice(
 					new I2cConnectionSettings( address, I2cMode.Master, I2cAddressFormat.SevenBit, 100_000U ) );
+
+				Debug.WriteLine( $"TEF6686 I2C probe 0x{address:X2} succeeded on controller {i2cControllerName}" );
 			}
 			catch( Exception ex )
 			{

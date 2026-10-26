@@ -1,8 +1,8 @@
-﻿namespace ImplicateX.TinyCLR.Drivers.Tuner.Tef668x
+﻿namespace ImplicateX.TinyCLR.Drivers.Tuner
 {
-	public partial class Device
+	public partial class Tef668x
 	{
-		public sealed class PatchEngine( Device device )
+		public sealed class PatchEngine( Tef668x device )
 		{
 			public void ApplyPatch()
 			{

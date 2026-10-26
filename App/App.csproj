@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="..\packages\GHIElectronics.TinyCLR.Devices.I2c.3.0.2.1000\build\net48\GHIElectronics.TinyCLR.Devices.I2c.props" Condition="Exists('..\packages\GHIElectronics.TinyCLR.Devices.I2c.3.0.2.1000\build\net48\GHIElectronics.TinyCLR.Devices.I2c.props')" />
+  <Import Project="..\packages\GHIElectronics.TinyCLR.Devices.Spi.3.0.2.1000\build\net48\GHIElectronics.TinyCLR.Devices.Spi.props" Condition="Exists('..\packages\GHIElectronics.TinyCLR.Devices.Spi.3.0.2.1000\build\net48\GHIElectronics.TinyCLR.Devices.Spi.props')" />
+  <Import Project="..\packages\GHIElectronics.TinyCLR.Devices.Gpio.3.0.2.1000\build\net48\GHIElectronics.TinyCLR.Devices.Gpio.props" Condition="Exists('..\packages\GHIElectronics.TinyCLR.Devices.Gpio.3.0.2.1000\build\net48\GHIElectronics.TinyCLR.Devices.Gpio.props')" />
+  <Import Project="..\packages\GHIElectronics.TinyCLR.Native.3.0.2.1000\build\net48\GHIElectronics.TinyCLR.Native.props" Condition="Exists('..\packages\GHIElectronics.TinyCLR.Native.3.0.2.1000\build\net48\GHIElectronics.TinyCLR.Native.props')" />
   <Import Project="..\packages\GHIElectronics.TinyCLR.Linq.3.0.2.1000\build\net48\GHIElectronics.TinyCLR.Linq.props" Condition="Exists('..\packages\GHIElectronics.TinyCLR.Linq.3.0.2.1000\build\net48\GHIElectronics.TinyCLR.Linq.props')" />
   <Import Project="..\packages\GHIElectronics.TinyCLR.Pins.3.0.2.1000\build\net48\GHIElectronics.TinyCLR.Pins.props" Condition="Exists('..\packages\GHIElectronics.TinyCLR.Pins.3.0.2.1000\build\net48\GHIElectronics.TinyCLR.Pins.props')" />
   <Import Project="..\..\ImplicateX.TinyCLR.Drivers.Tuner.Tef668x\packages\GHIElectronics.TinyCLR.Core.3.0.2.1000\build\net48\GHIElectronics.TinyCLR.Core.props" Condition="Exists('..\..\ImplicateX.TinyCLR.Drivers.Tuner.Tef668x\packages\GHIElectronics.TinyCLR.Core.3.0.2.1000\build\net48\GHIElectronics.TinyCLR.Core.props')" />
@@ -38,6 +42,9 @@
     <WarningLevel>4</WarningLevel>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="Board.cs" />
+    <Compile Include="Mcp23017.cs" />
+    <Compile Include="Mcp23017.Register.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
@@ -51,11 +58,32 @@
     </ProjectReference>
   </ItemGroup>
   <ItemGroup>
+    <Reference Include="GHIElectronics.TinyCLR.Devices.Gpio, Version=3.0.2.1000, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>..\packages\GHIElectronics.TinyCLR.Devices.Gpio.3.0.2.1000\lib\net48\GHIElectronics.TinyCLR.Devices.Gpio.dll</HintPath>
+    </Reference>
+    <Reference Include="GHIElectronics.TinyCLR.Devices.I2c, Version=3.0.2.1000, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>..\packages\GHIElectronics.TinyCLR.Devices.I2c.3.0.2.1000\lib\net48\GHIElectronics.TinyCLR.Devices.I2c.dll</HintPath>
+    </Reference>
+    <Reference Include="GHIElectronics.TinyCLR.Devices.Spi, Version=3.0.2.1000, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>..\packages\GHIElectronics.TinyCLR.Devices.Spi.3.0.2.1000\lib\net48\GHIElectronics.TinyCLR.Devices.Spi.dll</HintPath>
+    </Reference>
     <Reference Include="GHIElectronics.TinyCLR.Linq, Version=3.0.2.1000, Culture=neutral, processorArchitecture=MSIL">
       <HintPath>..\packages\GHIElectronics.TinyCLR.Linq.3.0.2.1000\lib\net48\GHIElectronics.TinyCLR.Linq.dll</HintPath>
     </Reference>
+    <Reference Include="GHIElectronics.TinyCLR.Native, Version=3.0.2.1000, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>..\packages\GHIElectronics.TinyCLR.Native.3.0.2.1000\lib\net48\GHIElectronics.TinyCLR.Native.dll</HintPath>
+    </Reference>
     <Reference Include="GHIElectronics.TinyCLR.Pins, Version=3.0.2.1000, Culture=neutral, processorArchitecture=MSIL">
       <HintPath>..\packages\GHIElectronics.TinyCLR.Pins.3.0.2.1000\lib\net48\GHIElectronics.TinyCLR.Pins.dll</HintPath>
+    </Reference>
+    <Reference Include="System.Device.Gpio, Version=3.0.2.1000, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>..\packages\GHIElectronics.TinyCLR.Devices.Gpio.3.0.2.1000\lib\net48\System.Device.Gpio.dll</HintPath>
+    </Reference>
+    <Reference Include="System.Device.I2c, Version=3.0.2.1000, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>..\packages\GHIElectronics.TinyCLR.Devices.I2c.3.0.2.1000\lib\net48\System.Device.I2c.dll</HintPath>
+    </Reference>
+    <Reference Include="System.Device.Spi, Version=3.0.2.1000, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>..\packages\GHIElectronics.TinyCLR.Devices.Spi.3.0.2.1000\lib\net48\System.Device.Spi.dll</HintPath>
     </Reference>
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
@@ -66,5 +94,9 @@
     <Error Condition="!Exists('..\..\ImplicateX.TinyCLR.Drivers.Tuner.Tef668x\packages\GHIElectronics.TinyCLR.Core.3.0.2.1000\build\net48\GHIElectronics.TinyCLR.Core.props')" Text="$([System.String]::Format('$(ErrorText)', '..\..\ImplicateX.TinyCLR.Drivers.Tuner.Tef668x\packages\GHIElectronics.TinyCLR.Core.3.0.2.1000\build\net48\GHIElectronics.TinyCLR.Core.props'))" />
     <Error Condition="!Exists('..\packages\GHIElectronics.TinyCLR.Pins.3.0.2.1000\build\net48\GHIElectronics.TinyCLR.Pins.props')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\GHIElectronics.TinyCLR.Pins.3.0.2.1000\build\net48\GHIElectronics.TinyCLR.Pins.props'))" />
     <Error Condition="!Exists('..\packages\GHIElectronics.TinyCLR.Linq.3.0.2.1000\build\net48\GHIElectronics.TinyCLR.Linq.props')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\GHIElectronics.TinyCLR.Linq.3.0.2.1000\build\net48\GHIElectronics.TinyCLR.Linq.props'))" />
+    <Error Condition="!Exists('..\packages\GHIElectronics.TinyCLR.Native.3.0.2.1000\build\net48\GHIElectronics.TinyCLR.Native.props')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\GHIElectronics.TinyCLR.Native.3.0.2.1000\build\net48\GHIElectronics.TinyCLR.Native.props'))" />
+    <Error Condition="!Exists('..\packages\GHIElectronics.TinyCLR.Devices.Gpio.3.0.2.1000\build\net48\GHIElectronics.TinyCLR.Devices.Gpio.props')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\GHIElectronics.TinyCLR.Devices.Gpio.3.0.2.1000\build\net48\GHIElectronics.TinyCLR.Devices.Gpio.props'))" />
+    <Error Condition="!Exists('..\packages\GHIElectronics.TinyCLR.Devices.Spi.3.0.2.1000\build\net48\GHIElectronics.TinyCLR.Devices.Spi.props')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\GHIElectronics.TinyCLR.Devices.Spi.3.0.2.1000\build\net48\GHIElectronics.TinyCLR.Devices.Spi.props'))" />
+    <Error Condition="!Exists('..\packages\GHIElectronics.TinyCLR.Devices.I2c.3.0.2.1000\build\net48\GHIElectronics.TinyCLR.Devices.I2c.props')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\GHIElectronics.TinyCLR.Devices.I2c.3.0.2.1000\build\net48\GHIElectronics.TinyCLR.Devices.I2c.props'))" />
   </Target>
 </Project>
