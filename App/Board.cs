@@ -5,12 +5,16 @@ using GHIElectronics.TinyCLR.Pins;
 using GHIElectronics.TinyCLR.Devices.Gpio;
 using GHIElectronics.TinyCLR.Devices.I2c;
 using ImplicateX.TinyCLR.Drivers.Expander;
-using ImplicateX.TinyCLR.Drivers.Tuner;
 
 namespace ImplicateX.TinyCLR.Drivers.Tuner
 {
 	public class Board
 	{
+		/// <summary>
+		/// Defines board-specific GPIO pin assignments used by controller peripherals.
+		/// </summary>
+		/// <remarks>Provides a centralized, strongly named mapping of FEZ Feather pin constants for interfaces such
+		/// as Ethernet, codec, decoder, tuner RDS, VFD, and control signals.</remarks>
 		public static class ControllerPin
 		{
 			public const int RemoteCtrl = FEZFeather.GpioPin.PA0;
@@ -45,6 +49,12 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 			public const int CodecReset = FEZFeather.GpioPin.PE8;
 		}
 
+		/// <summary>
+		/// Defines logical pin indexes for GPIO expander connections used by keys, rotary encoder signals, control outputs,
+		/// and status LEDs.
+		/// </summary>
+		/// <remarks>Use these constants to reference expander pins consistently across input handling and hardware
+		/// control code.</remarks>
 		public static class ExpanderPin
 		{
 			public const int KeyMenu = 0;
@@ -68,9 +78,24 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 		private I2cController i2cController;
 		private readonly Mcp23017 mcp23017;
 		private readonly Tef668x tef668x;
+		private readonly Tef668x.RdsSubSystem rdsSubSystem;
+		private readonly Thread rdsDebugThread;
+		private readonly bool rdsDebugRun;
 		private GpioPin tunerResPin;
 		private GpioPin tunerRdsPin;
 
+		// 8780, 8880, 9120, 9510 (WDR 3)*
+		// 9650, 9810, 9920 (WDR2)*, 10130 (WDR 4)*
+		// 10330 (WDRcosmo)*, 10600 (bigFM), 10670 (1LIVE)*
+
+		readonly ushort tuneFrequency = 9920;
+
+		/// <summary>
+		/// Initializes board peripherals, configures the TEF668x tuner, tunes to the configured FM frequency, and starts RDS
+		/// processing.
+		/// </summary>
+		/// <remarks>Subscribes to RDS decoder update events for diagnostic output and starts a background thread for
+		/// RDS debugging.</remarks>
 		public Board()
 		{
 			Initialize();
@@ -82,10 +107,25 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 
 			tef668x.Initialize();
 			tef668x.SetAudioMute( mute: false );
-			tef668x.TuneToFm( frequency10kHz: 9120 );
+			tef668x.TuneToFm( frequency10kHz: tuneFrequency );
 
+			rdsSubSystem = tef668x.CreateRdsSubSystem( dataAvailableActiveHigh: false );
+			rdsSubSystem.Decoder.PsUpdated += ps => Debug.WriteLine( $"RDS PS: {ps}" );
+			rdsSubSystem.Decoder.RtUpdated += rt => Debug.WriteLine( $"RDS RT: {rt}" );
+			rdsSubSystem.Decoder.TrafficStatusUpdated += ( tp, ta ) => Debug.WriteLine( $"RDS TP/TA: TP={tp} TA={ta}" );
+			rdsSubSystem.Start();
+
+			rdsDebugRun = true;
+			rdsDebugThread = new Thread( RdsDebugLoop );
+			rdsDebugThread.Start();
 		}
 
+		/// <summary>
+		/// Initializes GPIO and I2C controllers, resets the V1 hardware, configures the MCP23017 expander, and sets initial
+		/// pin states for output enables, audio switching, and tuner control pins.
+		/// </summary>
+		/// <remarks>Performs hardware-side effects, including reset pulse timing and default signal levels, and must
+		/// run before tuner operations that depend on configured pins.</remarks>
 		private void Initialize()
 		{
 			gpioController = GpioController.GetDefault();
@@ -119,7 +159,7 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 
 			GpioPin audioSwitchPin = mcp23017.OpenPin( ExpanderPin.AudioSwitch );
 			audioSwitchPin.SetDriveMode( GpioPinDriveMode.Output );
-			audioSwitchPin.Write( GpioPinValue.Low );
+			audioSwitchPin.Write( GpioPinValue.High );
 
 			tunerResPin = mcp23017.OpenPin( ExpanderPin.TunerReset );
 			tunerRdsPin = gpioController.OpenPin( ControllerPin.TunerRDS );
@@ -129,6 +169,17 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 
 		}
 
+		/// <summary>
+		/// Creates an <see cref="I2cDevice"/> from the specified controller and connection settings by using a compatible
+		/// controller factory method.
+		/// </summary>
+		/// <remarks>Supports controllers that provide either a CreateI2cDevice(I2cConnectionSettings) method or a
+		/// GetDevice(I2cConnectionSettings) method.</remarks>
+		/// <param name="controller">The <see cref="I2cController"/> instance used to create the device.</param>
+		/// <param name="settings">The connection settings that define the target I2C bus and device address.</param>
+		/// <returns>An <see cref="I2cDevice"/> created from <paramref name="controller"/> with the specified <paramref
+		/// name="settings"/>.</returns>
+		/// <exception cref="NotSupportedException">Thrown when the controller type does not expose a compatible method for creating an I2C device.</exception>
 		private static I2cDevice CreateI2cDevice( I2cController controller, I2cConnectionSettings settings )
 		{
 			var type = controller.GetType();
@@ -142,6 +193,30 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 			}
 
 			return ( I2cDevice )method.Invoke( controller, new object[] { settings } );
+		}
+
+		private void RdsDebugLoop()
+		{
+			while( rdsDebugRun )
+			{
+				bool hasNewFrames = false;
+
+				while( rdsSubSystem.TryDequeueRdsFrame( out Tef668x.RdsFrame frame ) )
+				{
+					hasNewFrames = true;
+					Debug.WriteLine(
+						$"RDS Frame: status=0x{frame.Status:X4} loss={frame.HasDataLoss} pi=0x{frame.BlockA:X4} b=0x{frame.BlockB:X4} c=0x{frame.BlockC:X4} d=0x{frame.BlockD:X4}" );
+				}
+
+				if( hasNewFrames )
+				{
+					Tef668x.RdsDisplayModel model = rdsSubSystem.GetDisplayModel();
+					Debug.WriteLine(
+						$"RDS Decoded: PI=0x{rdsSubSystem.Decoder.ProgramIdentifier:X4} PS='{model.PsName}' RT='{model.RadioText}' PTY='{model.PtyText}' TP={model.Tp} TA={model.Ta}" );
+				}
+
+				Thread.Sleep( 250 );
+			}
 		}
 
 		private bool ProbeAddress( int address )

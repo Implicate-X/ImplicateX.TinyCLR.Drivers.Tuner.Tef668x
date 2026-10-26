@@ -9,7 +9,7 @@
   <PropertyGroup>
     <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
     <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
-    <ProjectGuid>{7E80314F-601D-4F37-BC5A-457A18EFB985}</ProjectGuid>
+    <ProjectGuid>{AEF2ECF9-96F8-43C3-B230-CD3710448D6A}</ProjectGuid>
     <OutputType>Library</OutputType>
     <AppDesignerFolder>Properties</AppDesignerFolder>
     <RootNamespace>ImplicateX.TinyCLR.Drivers.Tuner.Tef668x</RootNamespace>

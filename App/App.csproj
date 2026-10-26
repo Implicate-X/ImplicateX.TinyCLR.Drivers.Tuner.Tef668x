@@ -52,12 +52,6 @@
     <None Include="packages.config" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\Library\Library.csproj">
-      <Project>{7E80314F-601D-4F37-BC5A-457A18EFB985}</Project>
-      <Name>Library</Name>
-    </ProjectReference>
-  </ItemGroup>
-  <ItemGroup>
     <Reference Include="GHIElectronics.TinyCLR.Devices.Gpio, Version=3.0.2.1000, Culture=neutral, processorArchitecture=MSIL">
       <HintPath>..\packages\GHIElectronics.TinyCLR.Devices.Gpio.3.0.2.1000\lib\net48\GHIElectronics.TinyCLR.Devices.Gpio.dll</HintPath>
     </Reference>
@@ -85,6 +79,12 @@
     <Reference Include="System.Device.Spi, Version=3.0.2.1000, Culture=neutral, processorArchitecture=MSIL">
       <HintPath>..\packages\GHIElectronics.TinyCLR.Devices.Spi.3.0.2.1000\lib\net48\System.Device.Spi.dll</HintPath>
     </Reference>
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Library\ImplicateX.TinyCLR.Drivers.Tuner.Tef668x.csproj">
+      <Project>{AEF2ECF9-96F8-43C3-B230-CD3710448D6A}</Project>
+      <Name>ImplicateX.TinyCLR.Drivers.Tuner.Tef668x</Name>
+    </ProjectReference>
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">

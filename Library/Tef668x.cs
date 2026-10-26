@@ -6,52 +6,85 @@ using GHIElectronics.TinyCLR.Devices.I2c;
 
 namespace ImplicateX.TinyCLR.Drivers.Tuner
 {
+	/// <summary>
+	/// TEF668x/TEF6686 tuner driver for TinyCLR using I2C control plus GPIO reset/RDS signaling.
+	/// </summary>
+	/// <param name="i2cControllerName">Name of the TinyCLR I2C controller (for example, <c>SC20100.I2cBus</c>).</param>
+	/// <param name="resPin">GPIO pin connected to the tuner reset input (active-low pulse during initialization).</param>
+	/// <param name="rdsPin">GPIO pin connected to the tuner RDS data-available signaling pin.</param>
 	public partial class Tef668x
 	(
 		string i2cControllerName,
 		GpioPin resPin,
-		GpioPin rdsPin,
-		int tefGpioIndex = 0,
-		bool enableRdsWatchdog = false
+		GpioPin rdsPin
 	)
 	{
+		private readonly bool enableDebugOutput = true;
 		private const byte i2cAddress = 0x64;
 		private const int patchChunkBytes = 24;
-		private const int rdsBufferCapacity = 32;
-		private const int rdsBurstReadLimit = 22;
-		private const int rdsBurstWindowMilliseconds = 1920;
-		private const int rdsServiceIntervalMilliseconds = 10;
-		private const int rdsLowLevelResyncIntervalMilliseconds = 87;
-		private const int rdsWatchdogIntervalMilliseconds = 75;
-		private const int rdsWatchdogEdgeGraceMilliseconds = 300;
 		private I2cDevice i2CDevice;
 		private PatchEngine patchEngine;
-		private readonly object rdsSync = new();
-		private readonly RdsFrame[] rdsFrames = new RdsFrame[ rdsBufferCapacity ];
-		private int rdsWriteIndex;
-		private int rdsReadIndex;
-		private int rdsFrameCount;
-		private bool isReadingRds;
-		private bool isRdsHandlerAttached;
-		private bool isRdsServiceThreadStarted;
-		private bool rdsServiceRequested;
-		private bool isRdsWatchdogStarted;
-		private DateTime lastRdsEdgeUtc = DateTime.MinValue;
 
-		public sealed class RdsFrame( ushort status, ushort blockA, ushort blockB, ushort blockC, ushort blockD, ushort decodeError, DateTime timestampUtc )
+		/// <summary>
+		/// Immutable snapshot of one RDS read transaction.
+		/// </summary>
+		/// <param name="status">Raw RDS status word.</param>
+		/// <param name="blockA">RDS block A payload.</param>
+		/// <param name="blockB">RDS block B payload.</param>
+		/// <param name="blockC">RDS block C payload.</param>
+		/// <param name="blockD">RDS block D payload.</param>
+		/// <param name="decodeError">Raw decode-error information returned by the tuner.</param>
+		/// <param name="timestampUtc">UTC timestamp captured when the frame was read.</param>
+		public sealed class RdsFrame
+		( 
+			ushort status, 
+			ushort blockA, 
+			ushort blockB, 
+			ushort blockC, 
+			ushort blockD, 
+			ushort decodeError, 
+			DateTime timestampUtc
+		)
 		{
+			/// <summary>Raw status bitfield returned by the device.</summary>
 			public ushort Status { get; } = status;
+
+			/// <summary>RDS block A (16-bit).</summary>
 			public ushort BlockA { get; } = blockA;
+
+			/// <summary>RDS block B (16-bit).</summary>
 			public ushort BlockB { get; } = blockB;
+
+			/// <summary>RDS block C (16-bit).</summary>
 			public ushort BlockC { get; } = blockC;
+
+			/// <summary>RDS block D (16-bit).</summary>
 			public ushort BlockD { get; } = blockD;
+
+			/// <summary>Raw decode error word for the frame.</summary>
 			public ushort DecodeError { get; } = decodeError;
+
+			/// <summary>UTC timestamp when this frame was created by the driver.</summary>
 			public DateTime TimestampUtc { get; } = timestampUtc;
 
+			/// <summary>Gets whether the status indicates valid RDS data availability.</summary>
 			public bool HasData => ( Status & 0x8000 ) != 0;
+
+			/// <summary>Gets whether data loss is indicated by the tuner.</summary>
 			public bool HasDataLoss => ( Status & 0x4000 ) != 0;
+
+			/// <summary>Gets whether this frame marks first PI data after synchronization/restart.</summary>
+			public bool IsFirstPiData => ( Status & 0x2000 ) != 0;
+
+			/// <summary>Gets whether the RDS decoder is synchronized.</summary>
+			public bool IsSynchronized => ( Status & 0x0200 ) != 0;
 		}
 
+		/// <summary>
+		/// Defines module identifier constants for TEF6686 functional blocks.
+		/// </summary>
+		/// <remarks>Use these identifiers when building commands for FM reception, AM reception, audio processing,
+		/// and system/application control.</remarks>
 		private sealed class Module
 		{
 			public const byte FMRadioReception = 0x20;
@@ -60,6 +93,12 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 			public const byte SystemAndApplicationControl = 0x40;
 		}
 
+
+		/// <summary>
+		/// Represents the device's operating state.
+		/// </summary>
+		/// <remarks>Uses an underlying type of <see cref="ushort"/> to map protocol-defined status codes to named
+		/// states.</remarks>
 		private enum OperationStatus : ushort
 		{
 			Boot = 0,
@@ -69,6 +108,21 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 			ActiveAm = 4
 		}
 
+		/// <summary>
+		/// Performs device startup and transitions the tuner into an active state.
+		/// </summary>
+		/// <remarks>
+		/// Sequence:
+		/// <list type="number">
+		/// <item>Hardware reset pulse via <c>resPin</c>.</item>
+		/// <item>I2C probe.</item>
+		/// <item>State-dependent boot flow (patch/start/activate when required).</item>
+		/// <item>Optional identification read for diagnostics.</item>
+		/// </list>
+		/// </remarks>
+		/// <exception cref="Exception">
+		/// Thrown when probing, status polling, or mandatory state transitions fail.
+		/// </exception>
 		public void Initialize()
 		{
 			Debug.WriteLine( "TEF6686 init: open GPIO pins" );
@@ -79,7 +133,8 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 			resPin.Write( GpioPinValue.High );
 			Thread.Sleep( 5 );
 
-			Debug.WriteLine( $"TEF6686 init: probe I2C address 0x{i2cAddress:X2}" );
+			Debug.WriteLineIf( enableDebugOutput, $"TEF6686 init: probe I2C address 0x{i2cAddress:X2}" );
+
 			if( !TryOpenDevice( i2cControllerName: i2cControllerName, address: i2cAddress ) )
 			{
 				throw new Exception( $"TEF6686 I2C device not found at address 0x{i2cAddress:X2} on controller {i2cControllerName}" );
@@ -90,28 +145,32 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 				throw new Exception( "TEF6686 operation status read failed." );
 			}
 
-			Debug.WriteLine( $"TEF6686 init: detected state 0x{currentStatus:X4}" );
+			Debug.WriteLineIf( enableDebugOutput, $"TEF6686 init: detected state 0x{currentStatus:X4}" );
 
 			if( currentStatus == (ushort)OperationStatus.Boot )
 			{
-				Debug.WriteLine( "TEF6686 init: boot state detected, running startup sequence" );
-				Debug.WriteLine( "TEF6686 init: apply patch/LUT" );
+				Debug.WriteLineIf( enableDebugOutput, "TEF6686 init: boot state detected, running startup sequence" );
+				Debug.WriteLineIf( enableDebugOutput, "TEF6686 init: apply patch/LUT" );
+
 				patchEngine = new( this );
 				patchEngine.ApplyPatch();
 
-				Debug.WriteLine( "TEF6686 init: send Start" );
+				Debug.WriteLineIf( enableDebugOutput, "TEF6686 init: send Start" );
+
 				WriteRawCommand( command: 0x14, 0x0001 );
 
-				Debug.WriteLine( "TEF6686 init: wait for idle state" );
+				Debug.WriteLineIf( enableDebugOutput, "TEF6686 init: wait for idle state" );
+
 				if( !WaitForOperationStatus( OperationStatus.Idle, timeoutMilliseconds: 1500 ) )
 				{
 					throw new Exception( "TEF6686 did not enter idle state after Start command." );
 				}
 
-				Debug.WriteLine( "TEF6686 init: send Activate mode=1" );
+				Debug.WriteLineIf( enableDebugOutput, "TEF6686 init: send Activate mode=1" );
 				WriteSetCommand( Module.SystemAndApplicationControl, command: 0x05, index: 0x01, 0x0001 );
 
-				Debug.WriteLine( "TEF6686 init: wait for active standby state" );
+				Debug.WriteLineIf( enableDebugOutput, "TEF6686 init: wait for active standby state" );
+
 				if( !WaitForOperationStatus( OperationStatus.ActiveStandby, timeoutMilliseconds: 2000 ) )
 				{
 					throw new Exception( "TEF6686 did not enter active standby state after Activate command." );
@@ -119,11 +178,13 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 			}
 			else if( currentStatus == (ushort)OperationStatus.Idle )
 			{
-				Debug.WriteLine( "TEF6686 init: idle state detected, skipping patch/start" );
-				Debug.WriteLine( "TEF6686 init: send Activate mode=1" );
+				Debug.WriteLineIf( enableDebugOutput, "TEF6686 init: idle state detected, skipping patch/start" );
+				Debug.WriteLineIf( enableDebugOutput, "TEF6686 init: send Activate mode=1" );
+
 				WriteSetCommand( Module.SystemAndApplicationControl, command: 0x05, index: 0x01, 0x0001 );
 
-				Debug.WriteLine( "TEF6686 init: wait for active state" );
+				Debug.WriteLineIf( enableDebugOutput, "TEF6686 init: wait for active state" );
+
 				if( !WaitForOperationStatus( OperationStatus.ActiveStandby, timeoutMilliseconds: 2000 ) )
 				{
 					throw new Exception( "TEF6686 did not enter active state after Activate command." );
@@ -131,28 +192,33 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 			}
 			else if( IsActiveState( currentStatus ) )
 			{
-				Debug.WriteLine( "TEF6686 init: active state already present, skipping startup sequence" );
+				Debug.WriteLineIf( enableDebugOutput, "TEF6686 init: active state already present, skipping startup sequence" );
 			}
 			else
 			{
 				throw new Exception( $"TEF6686 unsupported operation status 0x{currentStatus:X4}" );
 			}
 
-			Debug.WriteLine( "TEF6686 init: read identification" );
+			Debug.WriteLineIf( enableDebugOutput, "TEF6686 init: read identification" );
+
 			if( TryGetIdentification( out ushort deviceId, out ushort hwVersion, out ushort swVersion ) )
 			{
-				Debug.WriteLine( $"TEF6686 identification: device=0x{deviceId:X4}, hw=0x{hwVersion:X4}, sw=0x{swVersion:X4}" );
+				Debug.WriteLineIf( enableDebugOutput, $"TEF6686 identification: device=0x{deviceId:X4}, hw=0x{hwVersion:X4}, sw=0x{swVersion:X4}" );
 			}
 			else
 			{
-				Debug.WriteLine( "TEF6686 identification read failed" );
+				Debug.WriteLineIf( enableDebugOutput, "TEF6686 identification read failed" );
 			}
 
-			InitializeRdsCapture();
-
-			Debug.WriteLine( "TEF6686 init: startup sequence complete" );
+			Debug.WriteLineIf( enableDebugOutput, "TEF6686 init: startup sequence complete" );
 		}
 
+		/// <summary>
+		/// Determines whether an operation status value represents an active state.
+		/// </summary>
+		/// <param name="status">Operation status value to evaluate.</param>
+		/// <returns><see langword="true"/> when <paramref name="status"/> is ActiveStandby, ActiveFm, or ActiveAm; otherwise, <see
+		/// langword="false"/>.</returns>
 		private bool IsActiveState( ushort status )
 		{
 			return status == (ushort)OperationStatus.ActiveStandby
@@ -160,6 +226,12 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 				|| status == (ushort)OperationStatus.ActiveAm;
 		}
 
+		/// <summary>
+		/// Waits for the operation status to reach the expected value within the specified timeout.
+		/// </summary>
+		/// <param name="expectedStatus">The expected operation status.</param>
+		/// <param name="timeoutMilliseconds">The timeout in milliseconds.</param>
+		/// <returns><see langword="true"/> if the expected status is reached within the timeout; otherwise <see langword="false"/>.</returns>
 		private bool WaitForOperationStatus( OperationStatus expectedStatus, int timeoutMilliseconds )
 		{
 			DateTime deadline = DateTime.UtcNow.AddMilliseconds( timeoutMilliseconds );
@@ -178,7 +250,7 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 					if( status == (ushort)expectedStatus
 						|| ( expectedStatus == OperationStatus.ActiveStandby && IsActiveState( status ) ) )
 					{
-						Debug.WriteLine( $"TEF6686 status reached: {expectedStatus} (0x{status:X4})" );
+						Debug.WriteLineIf( enableDebugOutput, $"TEF6686 status reached: {expectedStatus} (0x{status:X4})" );
 						return true;
 					}
 				}
@@ -186,10 +258,15 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 				Thread.Sleep( 10 );
 			}
 
-			Debug.WriteLine( $"TEF6686 status timeout waiting for {expectedStatus}" );
+			Debug.WriteLineIf( enableDebugOutput, $"TEF6686 status timeout waiting for {expectedStatus}" );
 			return false;
 		}
 
+		/// <summary>
+		/// Reads the current operation status from the system and application control module.
+		/// </summary>
+		/// <param name="status">When this method returns <see langword="true"/>, contains the current operation status; otherwise <c>0</c>.</param>
+		/// <returns><see langword="true"/> if the status is read successfully; otherwise <see langword="false"/>.</returns>
 		private bool TryGetOperationStatus( out ushort status )
 		{
 			status = 0;
@@ -213,6 +290,15 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 			return false;
 		}
 
+		/// <summary>
+		/// Reads device identification words.
+		/// </summary>
+		/// <param name="deviceId">Returned silicon/device identifier.</param>
+		/// <param name="hwVersion">Returned hardware version word.</param>
+		/// <param name="swVersion">Returned software/firmware version word.</param>
+		/// <returns>
+		/// <see langword="true"/> when all bytes were read successfully; otherwise <see langword="false"/>.
+		/// </returns>
 		public bool TryGetIdentification( out ushort deviceId, out ushort hwVersion, out ushort swVersion )
 		{
 			deviceId = 0;
@@ -240,13 +326,26 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 			return false;
 		}
 
+		/// <summary>
+		/// Enables or disables audio muting in the audio processing module.
+		/// </summary>
+		/// <param name="mute"><see langword="true"/> to mute audio; <see langword="false"/> to unmute.</param>
 		public void SetAudioMute( bool mute )
 		{
 			ushort mode = mute ? (ushort)1 : (ushort)0;
 			WriteSetCommand( Module.AudioProcessing, command: 0x0B, index: 0x01, mode );
-			Debug.WriteLine( $"TEF6686 audio mute: {( mute ? "on" : "off" )}" );
+			Debug.WriteLineIf( enableDebugOutput, $"TEF6686 audio mute: {( mute ? "on" : "off" )}" );
 		}
 
+		/// <summary>
+		/// Tunes the FM receiver to a specified frequency.
+		/// </summary>
+		/// <param name="frequency10kHz">
+		/// Target FM frequency in 10 kHz units (e.g., 10170 = 101.70 MHz).
+		/// </param>
+		/// <exception cref="ArgumentOutOfRangeException">
+		/// Thrown when frequency is outside 65.00 MHz to 108.00 MHz.
+		/// </exception>
 		public void TuneToFm( ushort frequency10kHz )
 		{
 			if( frequency10kHz < 6500 || frequency10kHz > 10800 )
@@ -255,9 +354,14 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 			}
 
 			WriteSetCommand( Module.FMRadioReception, command: 0x01, index: 0x01, 0x0001, frequency10kHz );
-			Debug.WriteLine( $"TEF6686 FM tune: {frequency10kHz / 100}.{frequency10kHz % 100:D2} MHz" );
+			Debug.WriteLineIf( enableDebugOutput, $"TEF6686 FM tune: {frequency10kHz / 100}.{frequency10kHz % 100:D2} MHz" );
 		}
 
+		/// <summary>
+		/// Reads FM quality status word.
+		/// </summary>
+		/// <param name="status">Returned raw quality status word.</param>
+		/// <returns><see langword="true"/> on successful transfer; otherwise <see langword="false"/>.</returns>
 		public bool TryGetFmQualityStatus( out ushort status )
 		{
 			status = 0;
@@ -272,46 +376,11 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 			return true;
 		}
 
-		public bool TryGetFmRdsStatus( out ushort status, out bool dataAvailable, out bool dataLoss )
-		{
-			status = 0;
-			dataAvailable = false;
-			dataLoss = false;
-			byte[] readBuffer = new byte[ 2 ];
-
-			if( !TryReadCommand( Module.FMRadioReception, command: 0x82, index: 0x01, readBuffer ) )
-			{
-				return false;
-			}
-
-			status = (ushort)( ( readBuffer[ 0 ] << 8 ) | readBuffer[ 1 ] );
-			dataAvailable = ( status & 0x8000 ) != 0;
-			dataLoss = ( status & 0x4000 ) != 0;
-			return true;
-		}
-
-		private bool TryGetFmRdsData( out RdsFrame frame )
-		{
-			frame = null;
-			byte[] readBuffer = new byte[ 12 ];
-
-			if( !TryReadCommand( Module.FMRadioReception, command: 0x83, index: 0x01, readBuffer ) )
-			{
-				return false;
-			}
-
-			ushort status = (ushort)( ( readBuffer[ 0 ] << 8 ) | readBuffer[ 1 ] );
-			frame = new RdsFrame(
-				status: status,
-				blockA: (ushort)( ( readBuffer[ 2 ] << 8 ) | readBuffer[ 3 ] ),
-				blockB: (ushort)( ( readBuffer[ 4 ] << 8 ) | readBuffer[ 5 ] ),
-				blockC: (ushort)( ( readBuffer[ 6 ] << 8 ) | readBuffer[ 7 ] ),
-				blockD: (ushort)( ( readBuffer[ 8 ] << 8 ) | readBuffer[ 9 ] ),
-				decodeError: (ushort)( ( readBuffer[ 10 ] << 8 ) | readBuffer[ 11 ] ),
-				timestampUtc: DateTime.UtcNow );
-			return true;
-		}
-
+		/// <summary>
+		/// Reads FM signal status word.
+		/// </summary>
+		/// <param name="status">Returned raw signal status word.</param>
+		/// <returns><see langword="true"/> on successful transfer; otherwise <see langword="false"/>.</returns>
 		public bool TryGetFmSignalStatus( out ushort status )
 		{
 			status = 0;
@@ -326,57 +395,94 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 			return true;
 		}
 
-		public int PendingRdsFrameCount
+		/// <summary>
+		/// Configures the RDS decoder mode and RDS output pin interface.
+		/// </summary>
+		/// <param name="mode">RDS mode (default: 1 = enabled).</param>
+		/// <param name="restart">Restart behavior (default: 2 = restart decoder path).</param>
+		/// <param name="pinInterface">
+		/// RDS pin mode (TEF6686 chapter 3.23): 0 = none, 2 = DAVN (active-low), 4 = RDDA/RDCL legacy 2-wire output.
+		/// </param>
+		public void SetRds( ushort mode = 1, ushort restart = 2, ushort pinInterface = 2 )
 		{
-			get
-			{
-				lock( rdsSync )
-				{
-					return rdsFrameCount;
-				}
-			}
+			WriteSetCommand( Module.FMRadioReception, command: 0x51, index: 0x01, mode, restart, pinInterface );
 		}
 
-		//public int PollRdsBuffer( int maxFrames )
-		//{
-		//	if( maxFrames <= 0 )
-		//	{
-		//		throw new ArgumentOutOfRangeException( nameof( maxFrames ) );
-		//	}
-
-		//	if( !TryBeginRdsRead() )
-		//	{
-		//		return 0;
-		//	}
-
-		//	try
-		//	{
-		//		return CaptureRdsFrames( maxFrames, stopWhenPinReleased: false );
-		//	}
-		//	finally
-		//	{
-		//		EndRdsRead();
-		//	}
-		//}
-
-		public bool TryDequeueRdsFrame( out RdsFrame frame )
+		/// <summary>
+		/// Creates an event-driven RDS subsystem bound to the configured RDS GPIO pin.
+		/// </summary>
+		/// <param name="dataAvailableActiveHigh">
+		/// GPIO polarity used by the consumer logic. Keep <see langword="true"/> when hardware wiring/inversion makes
+		/// "data available" appear as a high level at the MCU pin.
+		/// </param>
+		/// <returns>A configured <c>RdsSubSystem</c> instance.</returns>
+		public RdsSubSystem CreateRdsSubSystem( bool dataAvailableActiveHigh = true )
 		{
-			lock( rdsSync )
-			{
-				if( rdsFrameCount == 0 )
-				{
-					frame = null;
-					return false;
-				}
-
-				frame = rdsFrames[ rdsReadIndex ];
-				rdsFrames[ rdsReadIndex ] = null;
-				rdsReadIndex = ( rdsReadIndex + 1 ) % rdsBufferCapacity;
-				rdsFrameCount--;
-				return true;
-			}
+			return new RdsSubSystem( this, rdsPin, dataAvailableActiveHigh );
 		}
 
+		/// <summary>
+		/// Reads the current RDS status frame.
+		/// </summary>
+		/// <param name="frame">Returned RDS frame.</param>
+		/// <returns><see langword="true"/> on successful transfer; otherwise <see langword="false"/>.</returns>
+		public bool TryGetRdsStatus( out RdsFrame frame )
+		{
+			return TryReadRds( command: 0x82, out frame );
+		}
+
+		/// <summary>
+		/// Reads the current RDS data frame.
+		/// </summary>
+		/// <param name="frame">Returned RDS frame.</param>
+		/// <returns><see langword="true"/> on successful transfer; otherwise <see langword="false"/>.</returns>
+		public bool TryGetRdsData( out RdsFrame frame )
+		{
+			return TryReadRds( command: 0x83, out frame );
+		}
+
+		/// <summary>
+		/// Reads one 12-byte RDS frame payload from the FM reception module and converts it to an <see cref="RdsFrame"/>.
+		/// </summary>
+		/// <param name="command">
+		/// RDS read command to execute (for example, <c>0x82</c> for status or <c>0x83</c> for data).
+		/// </param>
+		/// <param name="frame">
+		/// When this method returns <see langword="true"/>, contains the parsed RDS frame with status, blocks A-D, decode error, and a UTC timestamp;
+		/// otherwise <see langword="null"/>.
+		/// </param>
+		/// <returns>
+		/// <see langword="true"/> if the command transfer succeeds and the frame is parsed; otherwise <see langword="false"/>.
+		/// </returns>
+		private bool TryReadRds( byte command, out RdsFrame frame )
+		{
+			frame = null;
+			byte[] readBuffer = new byte[ 12 ];
+
+			if( !TryReadCommand( Module.FMRadioReception, command: command, index: 0x01, readBuffer ) )
+			{
+				return false;
+			}
+
+			ushort status = (ushort)( ( readBuffer[ 0 ] << 8 ) | readBuffer[ 1 ] );
+			ushort blockA = (ushort)( ( readBuffer[ 2 ] << 8 ) | readBuffer[ 3 ] );
+			ushort blockB = (ushort)( ( readBuffer[ 4 ] << 8 ) | readBuffer[ 5 ] );
+			ushort blockC = (ushort)( ( readBuffer[ 6 ] << 8 ) | readBuffer[ 7 ] );
+			ushort blockD = (ushort)( ( readBuffer[ 8 ] << 8 ) | readBuffer[ 9 ] );
+			ushort decodeError = (ushort)( ( readBuffer[ 10 ] << 8 ) | readBuffer[ 11 ] );
+
+			frame = new RdsFrame( status, blockA, blockB, blockC, blockD, decodeError, DateTime.UtcNow );
+			return true;
+		}
+
+		/// <summary>
+		/// Reads FM processing metrics from the tuner DSP path.
+		/// </summary>
+		/// <param name="softmute">Soft-mute metric/value.</param>
+		/// <param name="highcut">High-cut metric/value.</param>
+		/// <param name="stereo">Stereo blend/stereo metric.</param>
+		/// <param name="sthiblend">ST-HI blend metric/value.</param>
+		/// <returns><see langword="true"/> on successful transfer; otherwise <see langword="false"/>.</returns>
 		public bool TryGetFmProcessingStatus( out ushort softmute, out ushort highcut, out ushort stereo, out ushort sthiblend )
 		{
 			softmute = 0;
@@ -397,6 +503,14 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 			return true;
 		}
 
+		/// <summary>
+		/// Reads a raw I2C command with a module, command, index, and data words, enforcing complete transfer semantics.
+		/// </summary>
+		/// <param name="module">Module byte.</param>
+		/// <param name="command">Command byte.</param>
+		/// <param name="index">Index byte.</param>
+		/// <param name="readBuffer">Buffer to store read data.</param>
+		/// <returns><see langword="true"/> on successful transfer; otherwise <see langword="false"/>.</returns>
 		private bool TryReadCommand( byte module, byte command, byte index, byte[] readBuffer )
 		{
 			byte[] writeBuffer = [ module, command, index ];
@@ -412,307 +526,13 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 			}
 		}
 
-		private void InitializeRdsCapture()
-		{
-			if( tefGpioIndex < 0 )
-			{
-				throw new ArgumentOutOfRangeException( nameof( tefGpioIndex ), "TEF6686 GPIO index must be zero or greater." );
-			}
-
-			Debug.WriteLine( $"TEF6686 RDS: route DAVN to tuner GPIO {tefGpioIndex}" );
-			WriteSetCommand( Module.SystemAndApplicationControl, command: 0x03, index: 0x01, (ushort)tefGpioIndex, Module.FMRadioReception, 0x0101 );
-			Debug.WriteLine( "TEF6686 RDS: enable data-available signal pin" );
-			WriteSetCommand( Module.FMRadioReception, command: 0x51, index: 0x01, 0x01, 0x02, 0x02 );
-
-			GpioPinValue initialLevel = rdsPin.Read();
-			Debug.WriteLine( $"TEF6686 RDS: pin level after setup = {initialLevel}" );
-
-			if( !isRdsHandlerAttached )
-			{
-				Debug.WriteLine( "TEF6686 RDS: attach GPIO interrupt handler" );
-				rdsPin.ValueChanged += OnRdsPinValueChanged;
-				isRdsHandlerAttached = true;
-			}
-
-			StartRdsServiceThread();
-
-			if( enableRdsWatchdog )
-			{
-				StartRdsWatchdog();
-			}
-			else
-			{
-				Debug.WriteLine( "TEF6686 RDS: watchdog disabled (IRQ-only mode)" );
-			}
-
-			if( TryGetFmRdsStatus( out ushort statusAfterSetup, out bool availableAfterSetup, out bool lossAfterSetup ) )
-			{
-				Debug.WriteLine( $"TEF6686 RDS: status after setup=0x{statusAfterSetup:X4} available={availableAfterSetup} loss={lossAfterSetup}" );
-				if( availableAfterSetup || lossAfterSetup )
-				{
-					Debug.WriteLine( "TEF6686 RDS: data already pending after init, schedule service" );
-					RequestRdsService();
-				}
-			}
-			else
-			{
-				Debug.WriteLine( "TEF6686 RDS: status read after setup failed" );
-			}
-		}
-
-		private void OnRdsPinValueChanged( GpioPin sender, GpioPinValueChangedEventArgs e )
-		{
-			lock( rdsSync )
-			{
-				lastRdsEdgeUtc = DateTime.UtcNow;
-			}
-
-			GpioPinValue level = sender.Read();
-			Debug.WriteLine( $"TEF6686 RDS: edge={e.Edge} level={level}" );
-			RequestRdsService();
-		}
-
-		private void StartRdsServiceThread()
-		{
-			if( isRdsServiceThreadStarted )
-			{
-				return;
-			}
-
-			isRdsServiceThreadStarted = true;
-			Debug.WriteLine( "TEF6686 RDS: start IRQ service worker" );
-
-			Thread serviceThread = new( RdsServiceLoop );
-			serviceThread.Start();
-		}
-
-		private void RequestRdsService()
-		{
-			lock( rdsSync )
-			{
-				rdsServiceRequested = true;
-			}
-		}
-
-		private bool TryConsumeRdsServiceRequest()
-		{
-			lock( rdsSync )
-			{
-				if( !rdsServiceRequested )
-				{
-					return false;
-				}
-
-				rdsServiceRequested = false;
-				return true;
-			}
-		}
-
-		private void RdsServiceLoop()
-		{
-			DateTime nextLowLevelResyncUtc = DateTime.MinValue;
-
-			while( true )
-			{
-				Thread.Sleep( rdsServiceIntervalMilliseconds );
-
-				bool request = TryConsumeRdsServiceRequest();
-				bool lowLevelResync = false;
-
-				if( !request && DateTime.UtcNow >= nextLowLevelResyncUtc && rdsPin.Read() == GpioPinValue.Low )
-				{
-					lowLevelResync = true;
-					nextLowLevelResyncUtc = DateTime.UtcNow.AddMilliseconds( rdsLowLevelResyncIntervalMilliseconds );
-				}
-
-				if( !request && !lowLevelResync )
-				{
-					continue;
-				}
-
-				if( !TryBeginRdsRead() )
-				{
-					continue;
-				}
-
-				try
-				{
-					if( !TryGetFmRdsStatus( out ushort status, out bool available, out bool loss ) )
-					{
-						Debug.WriteLine( "TEF6686 RDS service: status read failed" );
-						continue;
-					}
-
-					Debug.WriteLine( $"TEF6686 RDS service: status=0x{status:X4} available={available} loss={loss}" );
-					if( !available && !loss )
-					{
-						continue;
-					}
-
-					CaptureRdsFrames( maxFrames: rdsBurstReadLimit, stopWhenPinReleased: true );
-				}
-				finally
-				{
-					EndRdsRead();
-				}
-			}
-		}
-
-		private void StartRdsWatchdog()
-		{
-			if( isRdsWatchdogStarted )
-			{
-				return;
-			}
-
-			isRdsWatchdogStarted = true;
-			Debug.WriteLine( "TEF6686 RDS: start watchdog" );
-
-			Thread watchdogThread = new( RdsWatchdogLoop );
-			watchdogThread.Start();
-		}
-
-		private void RdsWatchdogLoop()
-		{
-			while( true )
-			{
-				Thread.Sleep( rdsWatchdogIntervalMilliseconds );
-
-				DateTime now = DateTime.UtcNow;
-				DateTime edgeTime;
-				lock( rdsSync )
-				{
-					edgeTime = lastRdsEdgeUtc;
-				}
-
-				if( edgeTime != DateTime.MinValue && ( now - edgeTime ).TotalMilliseconds < rdsWatchdogEdgeGraceMilliseconds )
-				{
-					continue;
-				}
-
-				if( !TryBeginRdsRead() )
-				{
-					continue;
-				}
-
-				try
-				{
-					if( !TryGetFmRdsStatus( out ushort status, out bool available, out bool loss ) )
-					{
-						continue;
-					}
-
-					if( !available && !loss )
-					{
-						continue;
-					}
-
-					Debug.WriteLine( $"TEF6686 RDS watchdog: pending status=0x{status:X4} available={available} loss={loss}" );
-					CaptureRdsFrames( maxFrames: rdsBurstReadLimit, stopWhenPinReleased: false );
-				}
-				finally
-				{
-					EndRdsRead();
-				}
-			}
-		}
-
-		private bool TryBeginRdsRead()
-		{
-			lock( rdsSync )
-			{
-				if( isReadingRds )
-				{
-					return false;
-				}
-
-				isReadingRds = true;
-				return true;
-			}
-		}
-
-		private void EndRdsRead()
-		{
-			lock( rdsSync )
-			{
-				isReadingRds = false;
-			}
-		}
-
-		private int CaptureRdsFrames( int maxFrames, bool stopWhenPinReleased )
-		{
-			int capturedFrames = 0;
-			DateTime burstDeadline = DateTime.UtcNow.AddMilliseconds( rdsBurstWindowMilliseconds );
-			Debug.WriteLine( $"TEF6686 RDS: capture start max={maxFrames} stopOnPinRelease={stopWhenPinReleased} pin={rdsPin.Read()}" );
-
-			for( int i = 0; i < maxFrames && DateTime.UtcNow < burstDeadline; )
-			{
-				if( !TryGetFmRdsData( out RdsFrame frame ) )
-				{
-					Debug.WriteLine( "TEF6686 RDS: Get_RDS_Data read failed, stop capture" );
-					break;
-				}
-
-				if( frame.HasData || frame.HasDataLoss )
-				{
-					EnqueueRdsFrame( frame );
-					capturedFrames++;
-					i++;
-					Debug.WriteLine( $"TEF6686 RDS frame: A=0x{frame.BlockA:X4} B=0x{frame.BlockB:X4} C=0x{frame.BlockC:X4} D=0x{frame.BlockD:X4} err=0x{frame.DecodeError:X4} status=0x{frame.Status:X4}" );
-					continue;
-				}
-
-				if( TryGetFmRdsStatus( out ushort statusSnapshot, out bool availableSnapshot, out bool lossSnapshot ) )
-				{
-					Debug.WriteLine( $"TEF6686 RDS: empty data read status=0x{statusSnapshot:X4} available={availableSnapshot} loss={lossSnapshot} pin={rdsPin.Read()}" );
-					if( !availableSnapshot && !lossSnapshot )
-					{
-						Debug.WriteLine( "TEF6686 RDS: no pending RDS data after empty read, stop capture" );
-						break;
-					}
-				}
-				else
-				{
-					Debug.WriteLine( "TEF6686 RDS: empty data read and Get_RDS_Status failed" );
-					break;
-				}
-
-				if( !stopWhenPinReleased )
-				{
-					Debug.WriteLine( "TEF6686 RDS: stop capture after empty read (polling mode)" );
-					break;
-				}
-
-				Thread.Sleep( 10 );
-			}
-
-			if( DateTime.UtcNow >= burstDeadline )
-			{
-				Debug.WriteLine( "TEF6686 RDS: capture deadline reached" );
-			}
-
-			Debug.WriteLine( $"TEF6686 RDS: capture end frames={capturedFrames} pin={rdsPin.Read()}" );
-			return capturedFrames;
-		}
-
-		private void EnqueueRdsFrame( RdsFrame frame )
-		{
-			lock( rdsSync )
-			{
-				rdsFrames[ rdsWriteIndex ] = frame;
-				rdsWriteIndex = ( rdsWriteIndex + 1 ) % rdsBufferCapacity;
-
-				if( rdsFrameCount == rdsBufferCapacity )
-				{
-					rdsReadIndex = ( rdsReadIndex + 1 ) % rdsBufferCapacity;
-				}
-				else
-				{
-					rdsFrameCount++;
-				}
-			}
-		}
-
+		/// <summary>
+		/// Writes a raw I2C command with a module, command, index, and data words, enforcing complete transfer semantics.
+		/// </summary>
+		/// <param name="module">Module byte.</param>
+		/// <param name="command">Command byte.</param>
+		/// <param name="index">Index byte.</param>
+		/// <param name="dataWords">Data words to send.</param>
 		private void WriteSetCommand( byte module, byte command, byte index, params ushort[] dataWords )
 		{
 			byte[] buffer = new byte[ 3 + ( dataWords.Length * 2 ) ];
@@ -730,6 +550,11 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 			WriteBuffer( buffer );
 		}
 
+		/// <summary>
+		/// Writes a raw I2C command and enforces complete transfer semantics.
+		/// </summary>
+		/// <param name="command">Command byte.</param>
+		/// <param name="dataWords">Data words to send.</param>
 		private void WriteRawCommand( byte command, params ushort[] dataWords )
 		{
 			byte[] buffer = new byte[ 1 + ( dataWords.Length * 2 ) ];
@@ -745,6 +570,14 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 			WriteBuffer( buffer );
 		}
 
+		/// <summary>
+		/// Sends boot/patch payload data in fixed-size chunks aligned to 16-bit words.
+		/// </summary>
+		/// <param name="command">Boot-stream command byte.</param>
+		/// <param name="data">Patch/LUT data payload.</param>
+		/// <exception cref="ArgumentException">
+		/// Thrown when <paramref name="data"/> length is not aligned to 2-byte words.
+		/// </exception>
 		private void WriteBootDataStream( byte command, byte[] data )
 		{
 			if( data.Length % 2 != 0 )
@@ -768,6 +601,11 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 			}
 		}
 
+		/// <summary>
+		/// Writes a raw I2C frame and enforces complete transfer semantics.
+		/// </summary>
+		/// <param name="buffer">Encoded command/data buffer to write.</param>
+		/// <exception cref="Exception">Thrown if the write is not a full transfer.</exception>
 		private void WriteBuffer( byte[] buffer )
 		{
 			I2cTransferResult result = i2CDevice.WritePartial( buffer );
@@ -778,6 +616,14 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 			}
 		}
 
+		/// <summary>
+		/// Opens and probes the target I2C device address.
+		/// </summary>
+		/// <param name="i2cControllerName">TinyCLR I2C controller name.</param>
+		/// <param name="address">7-bit I2C slave address.</param>
+		/// <returns>
+		/// <see langword="true"/> if the device can be opened and appears responsive; otherwise <see langword="false"/>.
+		/// </returns>
 		private bool TryOpenDevice( string i2cControllerName, byte address )
 		{
 			I2cController i2cController = I2cController.FromName( i2cControllerName );
@@ -787,11 +633,11 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 				this.i2CDevice = i2cController.GetDevice(
 					new I2cConnectionSettings( address, I2cMode.Master, I2cAddressFormat.SevenBit, 100_000U ) );
 
-				Debug.WriteLine( $"TEF6686 I2C probe 0x{address:X2} succeeded on controller {i2cControllerName}" );
+				Debug.WriteLineIf( enableDebugOutput, $"TEF6686 I2C probe 0x{address:X2} succeeded on controller {i2cControllerName}" );
 			}
 			catch( Exception ex )
 			{
-				Debug.WriteLine( $"TEF6686 I2C probe 0x{address:X2} failed: {ex.Message}" );
+				Debug.WriteLineIf( enableDebugOutput, $"TEF6686 I2C probe 0x{address:X2} failed: {ex.Message}" );
 				return false;
 			}
 
@@ -806,7 +652,7 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 			}
 			catch( Exception ex )
 			{
-				Debug.WriteLine( $"I2C probe failed for address 0x{address:X2}: {ex.Message}" );
+				Debug.WriteLineIf( enableDebugOutput, $"I2C probe failed for address 0x{address:X2}: {ex.Message}" );
 			}
 
 			return false;
