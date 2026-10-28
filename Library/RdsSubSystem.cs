@@ -39,7 +39,7 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 			private readonly object syncRoot = new object();
 			private readonly AutoResetEvent workerSignal = new AutoResetEvent( false );
 
-			private Thread workerThread;
+			private Thread workerThread = null!;
 			private bool runWorker;
 			private bool disposed;
 			private bool interruptPending;
@@ -65,7 +65,7 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 				}
 			}
 
-			public event Action<RdsFrame> FrameReceived;
+			public event Action<RdsFrame> FrameReceived = null!;
 
 			/// <summary>
 			/// Configures the tuner RDS decoder to enabled mode with a decoder restart and DAVN pin signaling on the RDS
@@ -91,7 +91,7 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 				{
 					if( frameQueue.Count == 0 )
 					{
-						frame = null;
+						frame = null!;
 						return false;
 					}
 
@@ -159,7 +159,7 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 			/// previous worker thread before returning.</remarks>
 			public void Stop()
 			{
-				Thread threadToJoin = null;
+				Thread threadToJoin = null!;
 
 				lock( syncRoot )
 				{
@@ -170,7 +170,7 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 
 					runWorker = false;
 					threadToJoin = workerThread;
-					workerThread = null;
+					workerThread = null!;
 				}
 
 				rdsPin.ValueChanged -= OnRdsPinValueChanged;

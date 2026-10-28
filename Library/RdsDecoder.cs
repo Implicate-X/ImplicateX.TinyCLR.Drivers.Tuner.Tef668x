@@ -14,19 +14,19 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 			/// <summary>
 			/// Gets or sets the Program Service (PS) name.
 			/// </summary>
-			public string PsName { get; set; }
+			public string PsName { get; set; } = string.Empty;
 			/// <summary>
 			/// Gets or sets the Radio Text (RT).
 			/// </summary>
-			public string RadioText { get; set; }
+			public string RadioText { get; set; } = string.Empty;
 			/// <summary>
 			/// Gets or sets the Program Type (PTY) text.
 			/// </summary>
-			public string PtyText { get; set; }
+			public string PtyText { get; set; } = string.Empty;
 			/// <summary>
 			/// Gets or sets the PI region code.
 			/// </summary>
-			public string PiRegion { get; set; }
+			public string PiRegion { get; set; } = string.Empty;
 			/// <summary>
 			/// Gets or sets a value indicating whether the station is a Traffic Program (TP).
 			/// </summary>
@@ -38,7 +38,7 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 			/// <summary>
 			/// Gets or sets the list of Alternative Frequencies (AF).
 			/// </summary>
-			public IList<double> AfList { get; set; }
+			public IList<double> AfList { get; set; } = null!;
 		}
 
 		/// <summary>
@@ -66,8 +66,8 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 			private bool rtTextAbFlag;
 			private bool rtVersionA = true;
 
-			public string ProgramServiceName { get; private set; }
-			public string RadioText { get; private set; }
+			public string ProgramServiceName { get; private set; } = string.Empty;
+			public string RadioText { get; private set; } = string.Empty;
 			public ushort ProgramIdentifier { get; private set; }
 			public int ProgramType { get; private set; }
 			public bool TrafficProgram { get; private set; }
@@ -76,10 +76,10 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 			public string RegionCode => GetPiRegion( ProgramIdentifier );
 			public IList<double> AlternativeFrequencies => afFrequencies;
 
-			public event Action<string> PsUpdated;
-			public event Action<string> RtUpdated;
-			public event Action<IList<double>> AfUpdated;
-			public event Action<bool, bool> TrafficStatusUpdated;
+			public event Action<string> PsUpdated = null!;
+			public event Action<string> RtUpdated = null!;
+			public event Action<IList<double>> AfUpdated = null!;
+			public event Action<bool, bool> TrafficStatusUpdated = null!;
 
 			/// <summary>
 			/// Processes a single RDS frame, updates decoder state and program metadata, raises traffic status notifications,
@@ -339,8 +339,8 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 				Array.Clear( psLastWordValid, 0, psLastWordValid.Length );
 				ResetRtState();
 
-				ProgramServiceName = null;
-				RadioText = null;
+				ProgramServiceName = string.Empty;
+				RadioText = string.Empty;
 
 				if( clearAlternativeFrequencies )
 				{

@@ -22,8 +22,8 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 		private readonly bool enableDebugOutput = true;
 		private const byte i2cAddress = 0x64;
 		private const int patchChunkBytes = 24;
-		private I2cDevice i2CDevice;
-		private PatchEngine patchEngine;
+		private I2cDevice i2CDevice = null!;
+		private PatchEngine patchEngine = null!;
 		private ushort currentFmFrequency10kHz;
 
 		/// <summary>
@@ -622,7 +622,7 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 		/// </returns>
 		private bool TryReadRds( byte command, out RdsFrame frame )
 		{
-			frame = null;
+			frame = null!;
 			byte[] readBuffer = new byte[ 12 ];
 
 			if( !TryReadCommand( Module.FMRadioReception, command: command, index: 0x01, readBuffer ) )
