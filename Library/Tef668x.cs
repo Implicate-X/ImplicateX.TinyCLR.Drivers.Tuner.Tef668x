@@ -543,6 +543,43 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 		}
 
 		/// <summary>
+		/// Reads FM quality data including RF level and related quality metrics.
+		/// </summary>
+		/// <param name="status">Quality status word.</param>
+		/// <param name="level">RF level in 0.1 dBµV (signed).</param>
+		/// <param name="usn">Ultrasonic noise detector result.</param>
+		/// <param name="wam">Wideband-AM multipath detector result.</param>
+		/// <param name="offset">Frequency offset in 0.1 kHz (signed).</param>
+		/// <param name="bandwidth">IF bandwidth in 0.1 kHz units.</param>
+		/// <param name="modulation">Modulation detector result.</param>
+		/// <returns><see langword="true"/> on successful transfer; otherwise <see langword="false"/>.</returns>
+		public bool TryGetFmQualityData( out ushort status, out short level, out ushort usn, out ushort wam, out short offset, out ushort bandwidth, out ushort modulation )
+		{
+			status = 0;
+			level = 0;
+			usn = 0;
+			wam = 0;
+			offset = 0;
+			bandwidth = 0;
+			modulation = 0;
+			byte[] readBuffer = new byte[ 14 ];
+
+			if( !TryReadCommand( Module.FMRadioReception, command: 0x81, index: 0x01, readBuffer ) )
+			{
+				return false;
+			}
+
+			status = (ushort)( ( readBuffer[ 0 ] << 8 ) | readBuffer[ 1 ] );
+			level = (short)( ( readBuffer[ 2 ] << 8 ) | readBuffer[ 3 ] );
+			usn = (ushort)( ( readBuffer[ 4 ] << 8 ) | readBuffer[ 5 ] );
+			wam = (ushort)( ( readBuffer[ 6 ] << 8 ) | readBuffer[ 7 ] );
+			offset = (short)( ( readBuffer[ 8 ] << 8 ) | readBuffer[ 9 ] );
+			bandwidth = (ushort)( ( readBuffer[ 10 ] << 8 ) | readBuffer[ 11 ] );
+			modulation = (ushort)( ( readBuffer[ 12 ] << 8 ) | readBuffer[ 13 ] );
+			return true;
+		}
+
+		/// <summary>
 		/// Reads FM signal status word.
 		/// </summary>
 		/// <param name="status">Returned raw signal status word.</param>

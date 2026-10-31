@@ -229,7 +229,6 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 						else if( tuner.TryGetRdsStatus( out RdsFrame statusFrame ) && ( statusFrame.HasData || statusFrame.HasDataLoss ) )
 						{
 							shouldService = true;
-							Debug.WriteLine( "RDS watchdog: pending data detected without IRQ edge." );
 						}
 					}
 
@@ -348,7 +347,6 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 			{
 				if( frame.HasDataLoss )
 				{
-					Debug.WriteLine( $"RDS LOSS detected (status[14]=1): status=0x{frame.Status:X4} PI=0x{frame.BlockA:X4}" );
 				}
 
 				lock( syncRoot )
