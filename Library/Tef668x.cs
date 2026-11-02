@@ -19,7 +19,7 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 		GpioPin rdsPin
 	)
 	{
-		private readonly bool enableDebugOutput = true;
+		private readonly bool enableDebugOutput = false;
 		private const byte i2cAddress = 0x64;
 		private const int patchChunkBytes = 24;
 		private I2cDevice i2CDevice = null!;

@@ -170,8 +170,8 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 					return;
 				}
 
-				char c1 = SanitizeRdsChar( (char)( blockD >> 8 ) );
-				char c2 = SanitizeRdsChar( (char)( blockD & 0xFF ) );
+				char c1 = SanitizeRdsChar( DecodeRdsChar( ( byte )( blockD >> 8 ) ) );
+				char c2 = SanitizeRdsChar( DecodeRdsChar( ( byte )( blockD & 0xFF ) ) );
 
 				psBuffer[ segment * 2 ] = c1;
 				psBuffer[ segment * 2 + 1 ] = c2;
@@ -217,10 +217,10 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 					}
 
 					int offset = segment * 4;
-					rtBuffer[ offset ] = ( char )( blockC >> 8 );
-					rtBuffer[ offset + 1 ] = ( char )( blockC & 0xFF );
-					rtBuffer[ offset + 2 ] = ( char )( blockD >> 8 );
-					rtBuffer[ offset + 3 ] = ( char )( blockD & 0xFF );
+					rtBuffer[ offset ] = DecodeRdsChar( ( byte )( blockC >> 8 ) );
+					rtBuffer[ offset + 1 ] = DecodeRdsChar( ( byte )( blockC & 0xFF ) );
+					rtBuffer[ offset + 2 ] = DecodeRdsChar( ( byte )( blockD >> 8 ) );
+					rtBuffer[ offset + 3 ] = DecodeRdsChar( ( byte )( blockD & 0xFF ) );
 				}
 				else
 				{
@@ -232,12 +232,35 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 					}
 
 					int offset = segment * 2;
-					rtBuffer[ offset ] = ( char )( blockD >> 8 );
-					rtBuffer[ offset + 1 ] = ( char )( blockD & 0xFF );
+					rtBuffer[ offset ] = DecodeRdsChar( ( byte )( blockD >> 8 ) );
+					rtBuffer[ offset + 1 ] = DecodeRdsChar( ( byte )( blockD & 0xFF ) );
 				}
 
 				rtReceived[ segment ] = true;
 				TryPublishRt( versionA );
+			}
+
+			/// <summary>
+			/// Converts a raw RDS character byte to a Unicode character using the station text mapping used by common EU broadcasters.
+			/// </summary>
+			/// <remarks>
+			/// This adds explicit mappings for German umlauts and sharp-s so PS/RT display text is readable on the VFD.
+			/// </remarks>
+			/// <param name="value">Raw 8-bit RDS character code.</param>
+			/// <returns>Mapped Unicode character.</returns>
+			private static char DecodeRdsChar( byte value )
+			{
+				switch( value )
+				{
+					case 0x5B: return 'Ä';
+					case 0x5C: return 'Ö';
+					case 0x5D: return 'Ü';
+					case 0x7B: return 'ä';
+					case 0x7C: return 'ö';
+					case 0x7D: return 'ü';
+					case 0x7E: return 'ß';
+					default: return ( char )value;
+				}
 			}
 
 			/// <summary>
