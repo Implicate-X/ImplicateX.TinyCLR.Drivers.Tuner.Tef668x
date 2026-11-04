@@ -360,6 +360,7 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 				Array.Clear( psReceived, 0, psReceived.Length );
 				Array.Clear( psLastWords, 0, psLastWords.Length );
 				Array.Clear( psLastWordValid, 0, psLastWordValid.Length );
+
 				ResetRtState();
 
 				ProgramServiceName = string.Empty;

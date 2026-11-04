@@ -214,6 +214,7 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 					}
 
 					bool shouldService;
+
 					lock( syncRoot )
 					{
 						shouldService = interruptPending;
