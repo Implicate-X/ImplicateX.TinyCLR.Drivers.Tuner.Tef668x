@@ -4,12 +4,12 @@
     <File Path="docs/TEF668X - User Manual.txt" />
   </Folder>
   <Folder Name="/Solution Items/">
-    <File Path="ImplicateX.TinyCLR.Drivers.Tuner.Tef668x.nuspec" />
     <File Path="license.txt" />
     <File Path="README.md" />
   </Folder>
-  <Project Path="App/App.csproj" Id="3fcf359a-31f6-4468-8cf3-5571285194e8">
+  <Project Path="../../Expander/ImplicateX.TinyCLR.Drivers.Expander.Mcp23017/ImplicateX.TinyCLR.Drivers.Expander.Mcp23017.csproj" Id="cef6ff1a-2573-d219-abbb-d85b5baabe36" />
+  <Project Path="App/ImplicateX.TinyCLR.Drivers.Tuner.Tef668x.App.csproj" Id="3fcf359a-31f6-4468-8cf3-5571285194e8">
     <Deploy />
   </Project>
-  <Project Path="Library/ImplicateX.TinyCLR.Drivers.Tuner.Tef668x.csproj" Id="7e80314f-601d-4f37-bc5a-457a18efb985" />
+  <Project Path="ImplicateX.TinyCLR.Drivers.Tuner.Tef668x.csproj" Id="7e80314f-601d-4f37-bc5a-457a18efb985" />
 </Solution>
