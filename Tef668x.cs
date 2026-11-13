@@ -19,6 +19,9 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 		GpioPin rdsPin
 	)
 	{
+		/// <summary>
+		/// Indicates whether debug output is enabled.
+		/// </summary>
 		private readonly bool enableDebugOutput = false;
 		private const byte i2cAddress = 0x64;
 		private const int patchChunkBytes = 24;
