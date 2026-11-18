@@ -74,15 +74,14 @@ namespace ImplicateX.TinyCLR.Drivers.Tuner
 			public const int LedStereo = 15;
 		}
 
-		private GpioController gpioController;
-		private I2cController i2cController;
-		private readonly Mcp23017 mcp23017;
+		private GpioController gpioController = null!;
+		private I2cController i2cController = null!;
 		private readonly Tef668x tef668x;
 		private readonly Tef668x.RdsSubSystem rdsSubSystem;
 		private readonly Thread rdsDebugThread;
 		private readonly bool rdsDebugRun;
-		private GpioPin tunerResPin;
-		private GpioPin tunerRdsPin;
+		private GpioPin tunerResPin = null!;
+		private GpioPin tunerRdsPin = null!;
 
 		// 8780, 8880, 9120, 9510 (WDR 3)*
 		// 9650, 9810, 9920 (WDR2)*, 10130 (WDR 4)*

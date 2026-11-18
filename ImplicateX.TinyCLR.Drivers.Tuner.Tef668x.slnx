@@ -3,6 +3,9 @@
     <File Path="docs/TEF668X - User Manual.pdf" />
     <File Path="docs/TEF668X - User Manual.txt" />
   </Folder>
+  <Folder Name="/GHI/">
+    <Project Path="../../../Libraries/GHIElectronics.TinyCLR.Pins/GHIElectronics.TinyCLR.Pins.csproj" Id="2dceef58-5455-457c-b968-52d791605d07" />
+  </Folder>
   <Folder Name="/Solution Items/">
     <File Path="license.txt" />
     <File Path="README.md" />
